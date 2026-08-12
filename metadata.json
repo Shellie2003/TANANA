@@ -1,0 +1,6 @@
+{
+  "name": "Stark HUD Launcher",
+  "description": "Futuristic gesture-controlled Stark HUD Android Launcher powered by CameraX and MediaPipe.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
