@@ -105,6 +105,63 @@ jobs:
           cp "$release" "$RELEASE_APK"
           cp "$debug" "$DEBUG_APK"
 
+      # Diagnostic d'empaquetage. Un « module de vision indisponible » sur appareil a trois
+      # causes possibles, que cette étape distingue sans avoir besoin du téléphone :
+      #   1. le modèle absent de l'archive ;
+      #   2. les bibliothèques natives de MediaPipe absentes ;
+      #   3. des segments ELF alignés sur 4 Ko, que les appareils Android 15+ à pages de 16 Ko
+      #      refusent de charger — le cas le plus insidieux, car tout compile normalement.
+      - name: Diagnostic de l'APK
+        run: |
+          set -euo pipefail
+
+          python3 - "$RELEASE_APK" <<'PY'
+          import sys, zipfile
+          apk = zipfile.ZipFile(sys.argv[1])
+          names = apk.namelist()
+
+          model = [n for n in names if n.startswith("assets/")]
+          print("## Assets embarqués")
+          if not model:
+              print("::error::Aucun asset dans l'APK : le modèle n'a pas été empaqueté.")
+              sys.exit(1)
+          for info in apk.infolist():
+              if info.filename.startswith("assets/"):
+                  method = "STORED" if info.compress_type == zipfile.ZIP_STORED else "DEFLATED"
+                  print(f"  {info.filename}  {info.file_size} octets  {method}")
+
+          if not any("hand_landmarker.task" in n for n in names):
+              print("::error::assets/hand_landmarker.task absent de l'APK.")
+              sys.exit(1)
+
+          print("## Bibliothèques natives")
+          libs = [n for n in names if n.endswith(".so")]
+          if not libs:
+              print("::error::Aucune bibliothèque native : MediaPipe ne pourra pas démarrer.")
+              sys.exit(1)
+          for lib in sorted(libs):
+              print(f"  {lib}")
+          PY
+
+          echo "## Alignement des segments ELF (16 Ko requis sur Android 15+)"
+          work=$(mktemp -d)
+          unzip -q -o "$RELEASE_APK" 'lib/*' -d "$work" || true
+          misaligned=0
+          while IFS= read -r so; do
+            align=$(readelf -lW "$so" 2>/dev/null | awk '$1=="LOAD" {print $NF}' | sort -u | tr '\n' ' ')
+            echo "  $(basename "$(dirname "$so")")/$(basename "$so") : $align"
+            case "$align" in
+              *0x4000*|*0x10000*) ;;
+              *) misaligned=$((misaligned + 1)) ;;
+            esac
+          done < <(find "$work/lib" -name '*.so' 2>/dev/null | sort)
+
+          if [ "$misaligned" -gt 0 ]; then
+            echo "::warning::$misaligned bibliothèque(s) native(s) alignée(s) sur 4 Ko. Elles échoueront à se charger sur un appareil Android 15+ configuré en pages de 16 Ko, ce qui rend le suivi de main indisponible."
+          else
+            echo "  Toutes les bibliothèques sont compatibles 16 Ko."
+          fi
+
       # Les APK sont publiées comme assets de release, et non comme artefacts Actions : les
       # assets de release ne consomment pas le quota de stockage des artefacts, et l'URL de
       # téléchargement reste stable au lieu d'expirer avec la rétention.
