@@ -5,14 +5,18 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
+import android.os.BatteryManager
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
@@ -76,11 +80,58 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private var cursorX = 0.5f
     private var cursorY = 0.5f
 
+    private var cameraBound = false
+
+    /**
+     * Suivi de l'état énergétique de l'appareil.
+     *
+     * L'écran éteint est le cas le plus important : la caméra est alors intégralement déliée,
+     * ce qui éteint le capteur et son processeur d'image. Se contenter d'ignorer les images
+     * laisserait tourner toute la chaîne d'acquisition, de loin le poste le plus coûteux.
+     */
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    analyzer?.screenOn = false
+                    unbindCamera()
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    analyzer?.screenOn = true
+                    refreshPowerState()
+                    bindCamera()
+                }
+                PowerManager.ACTION_POWER_SAVE_MODE_CHANGED,
+                Intent.ACTION_BATTERY_CHANGED -> refreshPowerState()
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         readScreenMetrics()
+
+        registerReceiver(
+            powerReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            }
+        )
+    }
+
+    /** Relit le mode économie d'énergie et le niveau de batterie. */
+    private fun refreshPowerState() {
+        val analyzer = this.analyzer ?: return
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        analyzer.powerSaveMode = powerManager?.isPowerSaveMode == true
+
+        val batteryManager = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        analyzer.batteryPercent =
+            batteryManager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -206,9 +257,24 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     // --- Caméra --------------------------------------------------------------------------------
 
     private fun startCamera() {
-        if (analyzer != null) return
-        val handAnalyzer = HandGestureAnalyzer(applicationContext, this)
-        analyzer = handAnalyzer
+        if (analyzer == null) {
+            analyzer = HandGestureAnalyzer(applicationContext, this)
+            refreshPowerState()
+        }
+        bindCamera()
+    }
+
+    private fun unbindCamera() {
+        if (!cameraBound) return
+        cameraBound = false
+        cameraProvider?.unbindAll()
+        overlayView?.hide()
+        Log.i(TAG, "Caméra déliée : écran éteint, aucune consommation de capteur")
+    }
+
+    private fun bindCamera() {
+        if (cameraBound) return
+        val handAnalyzer = analyzer ?: return
 
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
@@ -236,6 +302,7 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, imageAnalysis)
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
+                cameraBound = true
                 Log.i(TAG, "Contrôle gestuel système actif")
             } catch (e: Exception) {
                 Log.e(TAG, "Liaison caméra impossible", e)
@@ -288,7 +355,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        runCatching { unregisterReceiver(powerReceiver) }
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+        cameraBound = false
         cameraProvider?.unbindAll()
         cameraProvider = null
         analyzer?.close()

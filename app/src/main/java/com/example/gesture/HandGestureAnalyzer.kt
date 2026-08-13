@@ -15,6 +15,8 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.example.power.FrameGate
+import com.example.power.PowerMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -49,7 +51,11 @@ data class HandGestureState(
     /** Front montant du pincement : une seule frame, à consommer comme un clic. */
     val pinchClickTick: Long = 0L,
     /** Vrai sur la seule frame où la pose change : déclenche les actions ponctuelles. */
-    val isNewPose: Boolean = false
+    val isNewPose: Boolean = false,
+    /** Régime de cadence courant du moteur. */
+    val powerMode: PowerMode = PowerMode.IDLE,
+    /** Proportion d'images économisées par la régulation de cadence, entre 0 et 1. */
+    val savingsRatio: Float = 0f
 )
 
 interface HandGestureListener {
@@ -119,6 +125,27 @@ class HandGestureAnalyzer(
 
     private var inferenceStartedAt = 0L
     private var smoothedLatencyMs = 0f
+
+    /**
+     * Régulateur de cadence. Analyser chaque image alors qu'aucune main n'est présente est le
+     * poste de consommation dominant : le régulateur ramène la cadence à un balayage lent tant
+     * qu'il n'y a rien à suivre, et la rétablit intégralement dès la première détection.
+     */
+    private val frameGate = FrameGate()
+
+    /** Contexte énergétique, tenu à jour par le service ; lu depuis le thread d'analyse. */
+    @Volatile
+    var screenOn: Boolean = true
+
+    @Volatile
+    var powerSaveMode: Boolean = false
+
+    @Volatile
+    var batteryPercent: Int = -1
+
+    /** Régime courant et proportion d'images économisées, pour l'affichage. */
+    val powerMode: PowerMode get() = frameGate.mode
+    val savingsRatio: Float get() = frameGate.savingsRatio()
 
     private var isSimulationActive = false
     private var pinchClickTick = 0L
@@ -279,6 +306,15 @@ class HandGestureAnalyzer(
                 return
             }
 
+            // Le filtrage intervient avant toute conversion : une image ignorée ne coûte que sa
+            // fermeture, ni bitmap, ni inférence.
+            if (!frameGate.shouldProcess(
+                    SystemClock.uptimeMillis(), screenOn, powerSaveMode, batteryPercent
+                )
+            ) {
+                return
+            }
+
             demoteToCpuIfGpuFailing()
 
             val landmarker = handLandmarker ?: return
@@ -407,6 +443,8 @@ class HandGestureAnalyzer(
 
         if (classifier.pinchJustClosed) pinchClickTick = now
         wasHandDetected = true
+        // Réarme la pleine cadence : une main est là, la latence prime désormais sur l'énergie.
+        frameGate.onHandDetected(now)
 
         val (mappedX, mappedY) = cursorMapper.map(metrics.pointerX, metrics.pointerY)
         val smoothed = cursorFilter.filter(mappedX, mappedY, metrics.depth, now)
@@ -423,6 +461,8 @@ class HandGestureAnalyzer(
                 pinchStrength = gestureResult.pinchStrength,
                 confidence = gestureResult.confidence,
                 isNewPose = gestureResult.isNewPose,
+                powerMode = frameGate.mode,
+                savingsRatio = frameGate.savingsRatio(),
                 palmRotationDeg = metrics.palmRotationDeg,
                 landmarks = landmarks,
                 fps = currentFps,
@@ -452,7 +492,9 @@ class HandGestureAnalyzer(
                 gesture = GestureType.IDLE,
                 fps = currentFps,
                 latencyMs = smoothedLatencyMs.toInt(),
-                pinchClickTick = pinchClickTick
+                pinchClickTick = pinchClickTick,
+                powerMode = frameGate.mode,
+                savingsRatio = frameGate.savingsRatio()
             )
         )
     }
@@ -472,6 +514,7 @@ class HandGestureAnalyzer(
     }
 
     fun close() {
+        frameGate.reset()
         handLandmarker?.close()
         handLandmarker = null
         activeDelegate = null

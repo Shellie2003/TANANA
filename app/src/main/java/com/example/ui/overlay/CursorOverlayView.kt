@@ -58,12 +58,25 @@ class CursorOverlayView(context: Context) : View(context) {
         pinchStrength: Float,
         visible: Boolean
     ) {
+        // Une fenêtre de superposition invalidée en continu fait recomposer tout l'écran par le
+        // compositeur, y compris l'application au premier plan. Quand le curseur est masqué et
+        // le reste inchangé, ne rien redessiner est une économie directe de GPU.
+        val unchanged = !visible && !this.visible
         this.cursorX = x
         this.cursorY = y
         this.gesture = gesture
         this.pinchStrength = pinchStrength
         this.visible = visible
+        if (unchanged) return
+
         rotation = (rotation + 2f) % 360f
+        invalidate()
+    }
+
+    /** Masque le curseur et cesse de redessiner. */
+    fun hide() {
+        if (!visible) return
+        visible = false
         invalidate()
     }
 

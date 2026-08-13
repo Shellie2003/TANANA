@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.example.gesture.GestureType
+import com.example.power.PowerMode
 import com.example.service.StarkAccessibilityService
 import com.example.service.StarkVisionService
 import com.example.ui.EngineStatus
@@ -79,7 +80,9 @@ class MainActivity : ComponentActivity() {
                             confidence = state?.confidence ?: 0f,
                             fps = state?.fps ?: 0,
                             latencyMs = state?.latencyMs ?: 0,
-                            visionError = state?.visionError
+                            visionError = state?.visionError,
+                            powerMode = state?.powerMode ?: PowerMode.IDLE,
+                            savingsRatio = state?.savingsRatio ?: 0f
                         )
                         delay(200)
                     }

@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
 import com.example.gesture.GestureType
+import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
 import com.example.ui.theme.StarkCyan
 import com.example.ui.theme.StarkDarkBg
@@ -90,7 +91,11 @@ data class EngineStatus(
     val confidence: Float,
     val fps: Int,
     val latencyMs: Int,
-    val visionError: String?
+    val visionError: String?,
+    /** Régime de cadence : indique si le moteur économise ou tourne à plein. */
+    val powerMode: PowerMode = PowerMode.IDLE,
+    /** Proportion d'images économisées par la régulation, entre 0 et 1. */
+    val savingsRatio: Float = 0f
 )
 
 /**
@@ -344,8 +349,45 @@ private fun EngineCard(status: EngineStatus, isReady: Boolean, onToggle: (Boolea
                     Metric("Latence", "${status.latencyMs} ms", Modifier.weight(1f))
                     Metric("Précision", "${(status.confidence * 100).toInt()} %", Modifier.weight(1f))
                 }
+                Spacer(Modifier.height(10.dp))
+                PowerRow(status)
             }
         }
+    }
+}
+
+/**
+ * Régime énergétique et économie réalisée.
+ *
+ * Une consommation ne se pilote pas à l'aveugle : afficher la proportion d'images effectivement
+ * évitées est le seul moyen pour l'utilisateur de constater que la régulation opère, et pour
+ * nous de détecter qu'elle a cessé de fonctionner.
+ */
+@Composable
+private fun PowerRow(status: EngineStatus) {
+    val (label, color) = when (status.powerMode) {
+        PowerMode.ACTIVE -> "Pleine cadence — main suivie" to StarkCyan
+        PowerMode.SEARCHING -> "Cadence réduite — recherche" to StarkGold
+        PowerMode.IDLE -> "Balayage lent — économie" to StarkBlue
+        PowerMode.SUSPENDED -> "Suspendu — écran éteint" to Color.White.copy(alpha = 0.5f)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(10.dp))
+        Text(label, color = color, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        Text(
+            text = "${(status.savingsRatio * 100).toInt()} % d'images évitées",
+            color = Color.White.copy(alpha = 0.55f),
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace
+        )
     }
 }
 

@@ -88,9 +88,31 @@ le long du bord inférieur — le geste de navigation système —, avec l'écra
 La décision (`GesturePolicy`) est séparée de son exécution : la politique est du Kotlin pur, donc
 vérifiable sans appareil, sans caméra et sans service.
 
+## Consommation
+
+La caméra et l'inférence en continu sont, ensemble, l'un des profils les plus gourmands qu'une
+application Android puisse avoir. Trois mécanismes réduisent la facture, du plus fort au plus fin :
+
+| Mécanisme | Effet |
+|---|---|
+| Caméra déliée quand l'écran s'éteint | éteint capteur et processeur d'image, pas seulement l'analyse |
+| Régulation de cadence (`FrameGate`) | analyse à 2,5 img/s au repos au lieu de 30 |
+| Superposition non redessinée à vide | évite de faire recomposer l'écran entier par le compositeur |
+
+Le compromis est **asymétrique et délibéré** : on accepte de réagir plus lentement quand rien ne
+se passe, jamais quand quelque chose se passe. Détecter l'arrivée d'une main avec 400 ms de retard
+est imperceptible ; 400 ms de retard en pilotant le curseur serait rédhibitoire. La pleine cadence
+revient donc dès la première image contenant une main, et n'est jamais dégradée — même en mode
+économie d'énergie ou batterie faible.
+
+À 30 img/s en continu, l'analyse tournerait 108 000 fois par heure. Avec une main présente 10 %
+du temps, elle tourne environ 16 000 fois : sept fois moins de travail d'inférence. La proportion
+réellement économisée est affichée dans l'application.
+
 ## Tests
 
-Les composants de précision et la politique de commande sont couverts par 67 tests JVM (exécution en quelques dizaines de
+Les composants de précision, la politique de commande et la régulation de cadence sont couverts
+par 80 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash
