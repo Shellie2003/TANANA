@@ -76,6 +76,28 @@ pincement, échelle, position), ce qui rend les scénarios gestuels parfaitement
 absence de rebond au seuil, unicité du clic, rejet des faux balayages, invariance d'échelle,
 bruit et latence du filtre.
 
+## Intégration continue
+
+Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble la
+variante release **non signée**, et publie trois artefacts : l'APK, la table de correspondance
+R8 et les rapports de test.
+
+Les keystores n'étant pas versionnés, les configurations de signature ne sont créées que si le
+fichier correspondant existe réellement. Sans keystore, AGP produit `app-release-unsigned.apk`.
+Pour signer localement ou en publication :
+
+```bash
+KEYSTORE_PATH=/chemin/vers/ma-cle.jks \
+KEY_ALIAS=upload STORE_PASSWORD=... KEY_PASSWORD=... \
+  ./gradlew assembleRelease
+```
+
+Une APK non signée ne peut pas être installée telle quelle ; il faut la signer au préalable :
+
+```bash
+apksigner sign --ks ma-cle.jks --out app-release.apk app-release-unsigned.apk
+```
+
 ## Configuration requise
 
 - Caméra frontale (l'application reste fonctionnelle en mode tactile/simulation sans caméra)

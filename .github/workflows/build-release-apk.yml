@@ -1,0 +1,115 @@
+# Assemble la variante release du Stark HUD Launcher, sans la signer.
+name: APK release (non signée)
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+  workflow_dispatch:
+
+# Le workflow ne fait que lire le dépôt et publier un artefact ; aucun droit d'écriture requis.
+permissions:
+  contents: read
+
+# Un push qui en remplace un autre sur la même référence annule le build précédent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Assembler l'APK release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      # AGP 9.1.1 exige JDK 17 au minimum.
+      - name: Installer le JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Fournit le SDK Android et accepte les licences, sans quoi AGP ne peut pas
+      # télécharger la plateforme compileSdk 36.1.
+      - name: Installer le SDK Android
+        uses: android-actions/setup-android@v3
+
+      # Met en cache les dépendances et la distribution Gradle entre deux exécutions.
+      - name: Préparer Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Rendre gradlew exécutable
+        run: chmod +x ./gradlew
+
+      # Les tests du moteur gestuel tournent sur JVM : quelques secondes, sans émulateur.
+      # Ils s'exécutent avant l'assemblage pour échouer au plus tôt.
+      - name: Tests unitaires
+        run: ./gradlew testDebugUnitTest
+
+      - name: Publier les rapports de test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapports-tests
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Aucun keystore n'est fourni : la configuration de signature n'est pas créée et AGP
+      # produit app-release-unsigned.apk.
+      - name: Assembler l'APK release non signée
+        run: ./gradlew assembleRelease
+
+      - name: Vérifier que l'APK est bien non signée
+        run: |
+          set -euo pipefail
+          apk=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
+          if [ -z "$apk" ]; then
+            echo "::error::Aucune APK produite dans app/build/outputs/apk/release"
+            exit 1
+          fi
+          echo "APK produite : $apk ($(du -h "$apk" | cut -f1))"
+          # Une APK signée contient un bloc META-INF/*.RSA|DSA|EC ; son absence confirme
+          # que l'artefact devra être signé avant toute installation ou publication.
+          if unzip -l "$apk" | grep -qE 'META-INF/.*\.(RSA|DSA|EC)$'; then
+            echo "::warning::L'APK semble signée alors qu'aucun keystore n'était attendu."
+          else
+            echo "Confirmé : APK non signée."
+          fi
+
+      - name: Publier l'APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: stark-launcher-release-unsigned-${{ github.sha }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # Le fichier de correspondance R8 est indispensable pour désobfusquer les traces de
+      # plantage d'une build minifiée. Sans lui, l'APK publiée est indébogable.
+      - name: Publier la table de correspondance R8
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping-r8-${{ github.sha }}
+          path: app/build/outputs/mapping/release/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Récapitulatif
+        if: always()
+        run: |
+          {
+            echo "### APK release non signée"
+            echo ""
+            echo "| Élément | Valeur |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
+            echo "| Artefact | stark-launcher-release-unsigned-${GITHUB_SHA} |"
+            echo "| Signature | aucune — à signer avec \`apksigner\` avant installation |"
+          } >> "$GITHUB_STEP_SUMMARY"
