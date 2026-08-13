@@ -79,8 +79,12 @@ bruit et latence du filtre.
 ## Intégration continue
 
 Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble la
-variante release **non signée**, et publie trois artefacts : l'APK, la table de correspondance
-R8 et les rapports de test.
+variante release **non signée**, et la publie dans la release `unsigned-latest`.
+
+Le tag est glissant : il est recréé sur le commit courant à chaque build, ce qui donne une
+adresse de téléchargement permanente pour la dernière version. Les assets de release sont aussi
+préférés aux artefacts Actions parce qu'ils ne consomment pas le quota de stockage des
+artefacts, commun à tout le compte GitHub.
 
 Les keystores n'étant pas versionnés, les configurations de signature ne sont créées que si le
 fichier correspondant existe réellement. Sans keystore, AGP produit `app-release-unsigned.apk`.

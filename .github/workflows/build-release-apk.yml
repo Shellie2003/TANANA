@@ -9,9 +9,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Le workflow ne fait que lire le dépôt et publier un artefact ; aucun droit d'écriture requis.
+# Écriture nécessaire pour publier l'APK dans une release.
 permissions:
-  contents: read
+  contents: write
 
 # Un push qui en remplace un autre sur la même référence annule le build précédent.
 concurrency:
@@ -23,6 +23,8 @@ jobs:
     name: Assembler l'APK release
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ASSET_NAME: stark-hud-launcher-unsigned.apk
 
     steps:
       - name: Récupérer le dépôt
@@ -86,21 +88,56 @@ jobs:
             echo "Confirmé : APK non signée."
           fi
 
-      # Si cette étape échoue sur « Artifact storage quota has been hit », le problème n'est pas
-      # dans ce workflow : le quota d'artefacts est commun à tout le compte GitHub. Il faut
-      # supprimer d'anciens artefacts (Actions > Runs > Artifacts) dans les autres dépôts.
-      - name: Publier l'APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: stark-launcher-release-unsigned-${{ github.sha }}
-          # La table de correspondance R8 voyage avec l'APK plutôt que dans un artefact
-          # distinct : un seul artefact à gérer, et l'un est inutile sans l'autre.
-          path: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/mapping/release/mapping.txt
-          if-no-files-found: error
-          # Rétention courte : le quota de stockage des artefacts est commun à tout le compte.
-          retention-days: 7
+      # L'APK est publiée comme asset de release, et non comme artefact Actions : les assets de
+      # release ne consomment pas le quota de stockage des artefacts, et l'URL de téléchargement
+      # reste stable au lieu d'expirer avec la rétention.
+      #
+      # Le tag est glissant : il est supprimé puis recréé sur le commit courant à chaque build,
+      # ce qui garde une adresse de téléchargement permanente pour la dernière version.
+      - name: Publier l'APK dans la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: unsigned-latest
+        run: |
+          set -euo pipefail
+
+          apk=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
+          cp "$apk" "$ASSET_NAME"
+
+          # Les fichiers à joindre sont accumulés dans un tableau : la table de correspondance
+          # n'existe que si la minification a tourné.
+          assets=("$ASSET_NAME")
+          if [ -f app/build/outputs/mapping/release/mapping.txt ]; then
+            cp app/build/outputs/mapping/release/mapping.txt mapping-r8.txt
+            assets+=("mapping-r8.txt")
+          fi
+
+          # Notes rédigées dans un fichier plutôt qu'en --notes inline : plus lisible, et sans
+          # les pièges de quoting d'un argument multiligne contenant des backticks.
+          cat > notes.md <<NOTES
+          APK **non signée**, produite automatiquement depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
+
+          Une APK non signée ne s'installe pas telle quelle. Signez-la d'abord :
+
+          \`\`\`bash
+          apksigner sign --ks ma-cle.jks --out stark-hud-launcher.apk $ASSET_NAME
+          \`\`\`
+
+          \`mapping-r8.txt\` permet de désobfusquer les traces de plantage de cette build.
+          NOTES
+
+          # Tag glissant : supprimé puis recréé sur le commit courant, pour que l'adresse de
+          # téléchargement de la dernière version reste identique d'un build à l'autre.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Stark HUD Launcher — build non signé" \
+            --prerelease \
+            --notes-file notes.md
+
+          gh release upload "$TAG" "${assets[@]}" --clobber
+
+          echo "URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}" >> "$GITHUB_ENV"
 
       - name: Récapitulatif
         if: always()
@@ -111,6 +148,6 @@ jobs:
             echo "| Élément | Valeur |"
             echo "|---|---|"
             echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
-            echo "| Artefact | stark-launcher-release-unsigned-${GITHUB_SHA} |"
+            echo "| Téléchargement | ${URL:-non publié} |"
             echo "| Signature | aucune — à signer avec \`apksigner\` avant installation |"
           } >> "$GITHUB_STEP_SUMMARY"
