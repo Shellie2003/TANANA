@@ -13,6 +13,8 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /** État complet publié à chaque frame analysée. */
 data class HandGestureState(
@@ -39,6 +41,8 @@ data class HandGestureState(
     val isSimulationMode: Boolean = false,
     /** Vrai si le modèle de vision n'a pas pu être chargé : le suivi de main est indisponible. */
     val isVisionUnavailable: Boolean = false,
+    /** Cause de l'indisponibilité, affichée à l'écran pour rendre la panne diagnosticable. */
+    val visionError: String? = null,
     /** Front montant du pincement : une seule frame, à consommer comme un clic. */
     val pinchClickTick: Long = 0L
 )
@@ -80,6 +84,7 @@ class HandGestureAnalyzer(
 
     private var handLandmarker: HandLandmarker? = null
     private var visionUnavailable = false
+    private var visionError: String? = null
     private var activeDelegate: Delegate? = null
 
     /**
@@ -120,57 +125,84 @@ class HandGestureAnalyzer(
         setupMediaPipe()
     }
 
+    /**
+     * Trois tentatives d'initialisation, de la plus rapide à la plus robuste.
+     *
+     * Charger le modèle par son chemin d'asset est le plus économe — MediaPipe le projette
+     * directement en mémoire — mais dépend de la façon dont l'archive a empaqueté le fichier.
+     * En dernier recours, le modèle est lu dans un ByteBuffer direct : cela coûte 7,8 Mo de
+     * mémoire native mais fonctionne indépendamment de l'empaquetage.
+     *
+     * La cause de l'échec est conservée et remontée à l'interface : sans cela, un échec de
+     * chargement n'apparaissait que dans logcat, inaccessible à l'utilisateur.
+     */
     private fun setupMediaPipe() {
-        val hasModel = try {
-            context.assets.list("")?.contains(MODEL_ASSET) == true
-        } catch (e: Exception) {
-            Log.w(TAG, "Lecture des assets impossible", e)
-            false
-        }
+        val attempts = listOf(
+            Triple(Delegate.GPU, false, "GPU / asset"),
+            Triple(Delegate.CPU, false, "CPU / asset"),
+            Triple(Delegate.CPU, true, "CPU / mémoire")
+        )
 
-        if (!hasModel) {
-            Log.e(TAG, "Modèle $MODEL_ASSET absent des assets : suivi de main indisponible.")
-            visionUnavailable = true
-            return
-        }
-
-        // Le delegate GPU divise environ par deux la latence d'inférence quand il est disponible ;
-        // certains pilotes le refusent, d'où le repli CPU silencieux.
-        handLandmarker = createLandmarker(Delegate.GPU)?.also { activeDelegate = Delegate.GPU }
-            ?: createLandmarker(Delegate.CPU)?.also { activeDelegate = Delegate.CPU }
-        if (handLandmarker == null) {
-            Log.e(TAG, "Initialisation de HandLandmarker impossible (GPU et CPU).")
-            visionUnavailable = true
-        }
-    }
-
-    private fun createLandmarker(delegate: Delegate): HandLandmarker? = try {
-        val baseOptions = BaseOptions.builder()
-            .setDelegate(delegate)
-            .setModelAssetPath(MODEL_ASSET)
-            .build()
-
-        val options = HandLandmarker.HandLandmarkerOptions.builder()
-            .setBaseOptions(baseOptions)
-            // Seuils relevés par rapport aux valeurs par défaut : on préfère perdre une frame
-            // douteuse plutôt que piloter le curseur avec une détection incertaine.
-            .setMinHandDetectionConfidence(0.6f)
-            .setMinHandPresenceConfidence(0.6f)
-            .setMinTrackingConfidence(0.6f)
-            .setNumHands(1)
-            .setRunningMode(RunningMode.LIVE_STREAM)
-            .setResultListener { result, _ -> processHandResult(result) }
-            .setErrorListener { error ->
-                consecutiveInferenceErrors++
-                Log.w(TAG, "Erreur d'inférence MediaPipe: $error")
+        val failures = mutableListOf<String>()
+        for ((delegate, useBuffer, label) in attempts) {
+            val result = createLandmarker(delegate, useBuffer)
+            result.onSuccess { landmarker ->
+                handLandmarker = landmarker
+                activeDelegate = delegate
+                Log.i(TAG, "HandLandmarker initialisé ($label)")
+                return
             }
-            .build()
+            result.onFailure { error ->
+                Log.w(TAG, "Échec d'initialisation ($label): ${error.message}")
+                failures += "$label: ${error.message ?: error::class.java.simpleName}"
+            }
+        }
 
-        HandLandmarker.createFromOptions(context, options)
-    } catch (e: Throwable) {
-        Log.w(TAG, "Delegate $delegate indisponible: ${e.message}")
-        null
+        visionUnavailable = true
+        visionError = failures.lastOrNull() ?: "cause inconnue"
+        Log.e(TAG, "Suivi de main indisponible. Tentatives: ${failures.joinToString(" | ")}")
     }
+
+    /**
+     * Lit le modèle dans un ByteBuffer direct. MediaPipe exige un buffer direct : un
+     * HeapByteBuffer serait rejeté par la couche native.
+     */
+    private fun readModelIntoDirectBuffer(): ByteBuffer {
+        val bytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
+        return ByteBuffer.allocateDirect(bytes.size).apply {
+            order(ByteOrder.nativeOrder())
+            put(bytes)
+            rewind()
+        }
+    }
+
+    private fun createLandmarker(delegate: Delegate, useBuffer: Boolean): Result<HandLandmarker> =
+        runCatching {
+            val baseOptionsBuilder = BaseOptions.builder().setDelegate(delegate)
+            if (useBuffer) {
+                baseOptionsBuilder.setModelAssetBuffer(readModelIntoDirectBuffer())
+            } else {
+                baseOptionsBuilder.setModelAssetPath(MODEL_ASSET)
+            }
+
+            val options = HandLandmarker.HandLandmarkerOptions.builder()
+                .setBaseOptions(baseOptionsBuilder.build())
+                // Seuils relevés par rapport aux valeurs par défaut : on préfère perdre une frame
+                // douteuse plutôt que piloter le curseur avec une détection incertaine.
+                .setMinHandDetectionConfidence(0.6f)
+                .setMinHandPresenceConfidence(0.6f)
+                .setMinTrackingConfidence(0.6f)
+                .setNumHands(1)
+                .setRunningMode(RunningMode.LIVE_STREAM)
+                .setResultListener { result, _ -> processHandResult(result) }
+                .setErrorListener { error ->
+                    consecutiveInferenceErrors++
+                    Log.w(TAG, "Erreur d'inférence MediaPipe: $error")
+                }
+                .build()
+
+            HandLandmarker.createFromOptions(context, options)
+        }
 
     fun setSimulationMode(enabled: Boolean) {
         isSimulationActive = enabled
@@ -251,9 +283,11 @@ class HandGestureAnalyzer(
         handLandmarker?.close()
         activeDelegate = Delegate.CPU
         consecutiveInferenceErrors = 0
-        handLandmarker = createLandmarker(Delegate.CPU)
+        handLandmarker = createLandmarker(Delegate.CPU, useBuffer = false).getOrNull()
+            ?: createLandmarker(Delegate.CPU, useBuffer = true).getOrNull()
         if (handLandmarker == null) {
             visionUnavailable = true
+            visionError = "repli CPU impossible après défaillance du GPU"
             activeDelegate = null
         }
     }
@@ -407,7 +441,8 @@ class HandGestureAnalyzer(
                 isHandDetected = false,
                 gesture = GestureType.IDLE,
                 fps = currentFps,
-                isVisionUnavailable = true
+                isVisionUnavailable = true,
+                visionError = visionError
             )
         )
     }

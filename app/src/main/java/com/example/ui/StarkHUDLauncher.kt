@@ -38,12 +38,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
@@ -104,6 +106,7 @@ import androidx.core.graphics.drawable.toBitmap
 import com.example.gesture.GestureType
 import com.example.gesture.HandGestureState
 import com.example.gesture.HandLandmarks
+import com.example.service.StarkAccessibilityService
 import com.example.ui.theme.StarkBlue
 import com.example.ui.theme.StarkCyan
 import com.example.ui.theme.StarkDarkBg
@@ -717,6 +720,7 @@ fun StarkFooterGestureHUD(
             if (s.isVisionUnavailable) null else s.gesture
         }
     }
+    val visionError by remember { derivedStateOf { gestureState.value.visionError } }
 
     Column(
         modifier = modifier
@@ -754,6 +758,21 @@ fun StarkFooterGestureHUD(
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
+            )
+        }
+
+        // La cause exacte de la panne est affichée sous le badge : un échec de chargement du
+        // modèle n'apparaissait auparavant que dans logcat, hors de portée de l'utilisateur.
+        visionError?.let { detail ->
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = detail,
+                color = StarkRed.copy(alpha = 0.85f),
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
             )
         }
 
@@ -799,12 +818,15 @@ fun StarkFooterGestureHUD(
                     ) { Text("ROTATION", fontSize = 10.sp, color = Color.Black) }
                 }
             } else {
-                IconButton(onClick = onToggleCameraPIP) {
-                    Icon(
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = "Aperçu caméra",
-                        tint = StarkCyan
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SystemActionsRow()
+                    IconButton(onClick = onToggleCameraPIP) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = "Aperçu caméra",
+                            tint = StarkCyan
+                        )
+                    }
                 }
             }
         }
@@ -1170,7 +1192,59 @@ private fun loadLauncherApps(context: Context): List<LauncherAppItem> {
 
 private fun launchApp(context: Context, packageName: String) {
     try {
-        context.packageManager.getLaunchIntentForPackage(packageName)?.let { context.startActivity(it) }
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return
+        // Comportement attendu d'un launcher : chaque application vit dans sa propre tâche, ce
+        // qui la fait apparaître dans l'écran des applications récentes. RESET_TASK_IF_NEEDED
+        // ramène une tâche déjà ouverte au premier plan au lieu de la redémarrer.
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        context.startActivity(intent)
     } catch (_: Exception) {
+    }
+}
+
+/**
+ * Barre d'actions système. Le service d'accessibilité exposait déjà les actions Récents,
+ * Accueil et Notifications, mais rien ne les appelait : elles sont désormais accessibles.
+ */
+@Composable
+private fun SystemActionsRow(modifier: Modifier = Modifier) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        SystemActionButton(
+            icon = Icons.Default.Apps,
+            label = "Applications récentes",
+            action = StarkAccessibilityService.ACTION_GLOBAL_RECENTS
+        )
+        SystemActionButton(
+            icon = Icons.Default.Notifications,
+            label = "Notifications",
+            action = StarkAccessibilityService.ACTION_GLOBAL_NOTIFICATIONS
+        )
+    }
+}
+
+@Composable
+private fun SystemActionButton(icon: ImageVector, label: String, action: String) {
+    val context = LocalContext.current
+    IconButton(
+        onClick = {
+            // Sans service d'accessibilité activé, l'action est impossible : on ouvre le réglage
+            // correspondant plutôt que de laisser le bouton sans effet.
+            if (!StarkAccessibilityService.performGlobalAction(action)) {
+                runCatching {
+                    context.startActivity(
+                        Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            }
+        },
+        modifier = Modifier.size(34.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = StarkCyan,
+            modifier = Modifier.size(20.dp)
+        )
     }
 }
