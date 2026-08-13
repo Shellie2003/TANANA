@@ -78,8 +78,17 @@ bruit et latence du filtre.
 
 ## Intégration continue
 
-Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble la
-variante release **non signée**, et la publie dans la release `unsigned-latest`.
+Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble deux
+variantes installables, publiées dans la release `unsigned-latest` :
+
+| Fichier | Minifiée par R8 | Usage |
+|---|---|---|
+| `stark-hud-launcher-release.apk` | oui | l'artefact réel |
+| `stark-hud-launcher-debug.apk` | non | témoin de diagnostic |
+
+Les deux sont signées avec la clé de debug (`-PstarkDebugSigning=true`) : installables pour
+tester, jamais publiables. Comparer les deux isole immédiatement un problème de minification —
+si le suivi de main marche en debug mais pas en release, il manque une règle de conservation R8.
 
 Le tag est glissant : il est recréé sur le commit courant à chaque build, ce qui donne une
 adresse de téléchargement permanente pour la dernière version. Les assets de release sont aussi
@@ -87,19 +96,13 @@ préférés aux artefacts Actions parce qu'ils ne consomment pas le quota de sto
 artefacts, commun à tout le compte GitHub.
 
 Les keystores n'étant pas versionnés, les configurations de signature ne sont créées que si le
-fichier correspondant existe réellement. Sans keystore, AGP produit `app-release-unsigned.apk`.
-Pour signer localement ou en publication :
+fichier correspondant existe réellement. Sans keystore et sans `-PstarkDebugSigning`, AGP
+produit `app-release-unsigned.apk`, qu'Android refuse d'installer. Pour une vraie diffusion :
 
 ```bash
 KEYSTORE_PATH=/chemin/vers/ma-cle.jks \
 KEY_ALIAS=upload STORE_PASSWORD=... KEY_PASSWORD=... \
   ./gradlew assembleRelease
-```
-
-Une APK non signée ne peut pas être installée telle quelle ; il faut la signer au préalable :
-
-```bash
-apksigner sign --ks ma-cle.jks --out app-release.apk app-release-unsigned.apk
 ```
 
 ## Configuration requise

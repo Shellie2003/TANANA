@@ -1,5 +1,5 @@
-# Assemble la variante release du Stark HUD Launcher, sans la signer.
-name: APK release (non signée)
+# Assemble le Stark HUD Launcher en deux variantes installables, signées avec la clé de debug.
+name: APK installables (signées debug)
 
 on:
   push:
@@ -20,11 +20,12 @@ concurrency:
 
 jobs:
   build:
-    name: Assembler l'APK release
+    name: Assembler les APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      ASSET_NAME: stark-hud-launcher-unsigned.apk
+      RELEASE_APK: stark-hud-launcher-release.apk
+      DEBUG_APK: stark-hud-launcher-debug.apk
 
     steps:
       - name: Récupérer le dépôt
@@ -66,78 +67,90 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      # Aucun keystore n'est fourni : la configuration de signature n'est pas créée et AGP
-      # produit app-release-unsigned.apk.
-      - name: Assembler l'APK release non signée
-        run: ./gradlew assembleRelease
+      # Deux variantes, parce qu'elles répondent à deux questions différentes :
+      #  - release : minifiée par R8, c'est l'artefact réel ;
+      #  - debug   : sans minification, sert de témoin. Si le suivi de main marche en debug mais
+      #              pas en release, la cause est une règle de conservation R8 manquante.
+      # starkDebugSigning signe la release avec la clé de debug pour la rendre installable.
+      - name: Assembler les APK
+        run: ./gradlew assembleRelease assembleDebug -PstarkDebugSigning=true
 
-      - name: Vérifier que l'APK est bien non signée
+      - name: Vérifier que les APK sont signées
         run: |
           set -euo pipefail
-          apk=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
-          if [ -z "$apk" ]; then
-            echo "::error::Aucune APK produite dans app/build/outputs/apk/release"
-            exit 1
-          fi
-          echo "APK produite : $apk ($(du -h "$apk" | cut -f1))"
-          # Une APK signée contient un bloc META-INF/*.RSA|DSA|EC ; son absence confirme
-          # que l'artefact devra être signé avant toute installation ou publication.
-          if unzip -l "$apk" | grep -qE 'META-INF/.*\.(RSA|DSA|EC)$'; then
-            echo "::warning::L'APK semble signée alors qu'aucun keystore n'était attendu."
-          else
-            echo "Confirmé : APK non signée."
-          fi
 
-      # L'APK est publiée comme asset de release, et non comme artefact Actions : les assets de
-      # release ne consomment pas le quota de stockage des artefacts, et l'URL de téléchargement
-      # reste stable au lieu d'expirer avec la rétention.
+          check() {
+            local apk="$1" label="$2"
+            if [ ! -f "$apk" ]; then
+              echo "::error::APK $label introuvable ($apk)"
+              exit 1
+            fi
+            echo "$label : $(du -h "$apk" | cut -f1)"
+            # Une APK signée porte un bloc de signature v1 (META-INF/*.RSA) ou v2/v3
+            # (APK Signing Block, invisible dans la liste zip). apksigner tranche sans ambiguïté.
+            local apksigner
+            apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort | tail -1)
+            if ! "$apksigner" verify --print-certs "$apk" > /dev/null 2>&1; then
+              echo "::error::$label n'est pas signée : elle ne pourra pas être installée."
+              exit 1
+            fi
+            echo "  signature vérifiée"
+          }
+
+          release=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
+          debug=$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)
+          check "$release" "release (minifiée)"
+          check "$debug" "debug (non minifiée)"
+
+          cp "$release" "$RELEASE_APK"
+          cp "$debug" "$DEBUG_APK"
+
+      # Les APK sont publiées comme assets de release, et non comme artefacts Actions : les
+      # assets de release ne consomment pas le quota de stockage des artefacts, et l'URL de
+      # téléchargement reste stable au lieu d'expirer avec la rétention.
       #
       # Le tag est glissant : il est supprimé puis recréé sur le commit courant à chaque build,
       # ce qui garde une adresse de téléchargement permanente pour la dernière version.
-      - name: Publier l'APK dans la release
+      - name: Publier les APK dans la release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: unsigned-latest
         run: |
           set -euo pipefail
 
-          apk=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
-          cp "$apk" "$ASSET_NAME"
-
-          # Les fichiers à joindre sont accumulés dans un tableau : la table de correspondance
-          # n'existe que si la minification a tourné.
-          assets=("$ASSET_NAME")
+          assets=("$RELEASE_APK" "$DEBUG_APK")
           if [ -f app/build/outputs/mapping/release/mapping.txt ]; then
             cp app/build/outputs/mapping/release/mapping.txt mapping-r8.txt
             assets+=("mapping-r8.txt")
           fi
 
-          # Notes rédigées dans un fichier plutôt qu'en --notes inline : plus lisible, et sans
-          # les pièges de quoting d'un argument multiligne contenant des backticks.
           cat > notes.md <<NOTES
-          APK **non signée**, produite automatiquement depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
+          Builds installables depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
 
-          Une APK non signée ne s'installe pas telle quelle. Signez-la d'abord :
+          | Fichier | Minifiée par R8 | Usage |
+          |---|---|---|
+          | \`$RELEASE_APK\` | oui | l'artefact réel |
+          | \`$DEBUG_APK\` | non | témoin de diagnostic |
 
-          \`\`\`bash
-          apksigner sign --ks ma-cle.jks --out stark-hud-launcher.apk $ASSET_NAME
-          \`\`\`
+          Les deux sont **signées avec la clé de debug** : installables pour tester, mais à ne
+          jamais publier. Une vraie diffusion exige un keystore de release
+          (\`KEYSTORE_PATH\`, \`KEY_ALIAS\`, \`STORE_PASSWORD\`, \`KEY_PASSWORD\`).
 
-          \`mapping-r8.txt\` permet de désobfusquer les traces de plantage de cette build.
+          Si le suivi de main fonctionne avec la variante debug mais pas avec la release, la
+          cause est une règle de conservation R8 manquante : \`mapping-r8.txt\` rend la trace
+          de plantage lisible.
           NOTES
 
-          # Tag glissant : supprimé puis recréé sur le commit courant, pour que l'adresse de
-          # téléchargement de la dernière version reste identique d'un build à l'autre.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "Stark HUD Launcher — build non signé" \
+            --title "Stark HUD Launcher — builds de test" \
             --prerelease \
             --notes-file notes.md
 
           gh release upload "$TAG" "${assets[@]}" --clobber
 
-          echo "URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}" >> "$GITHUB_ENV"
+          echo "URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${RELEASE_APK}" >> "$GITHUB_ENV"
 
       - name: Récapitulatif
         if: always()
@@ -149,5 +162,5 @@ jobs:
             echo "|---|---|"
             echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
             echo "| Téléchargement | ${URL:-non publié} |"
-            echo "| Signature | aucune — à signer avec \`apksigner\` avant installation |"
+            echo "| Signature | clé de debug — installable, non publiable |"
           } >> "$GITHUB_STEP_SUMMARY"

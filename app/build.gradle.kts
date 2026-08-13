@@ -57,8 +57,19 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      // null = APK non signée, à signer ensuite via apksigner.
+
+      // Ordre de préférence pour la signature :
+      //   1. le keystore de release, s'il est fourni ;
+      //   2. la clé de debug, uniquement si -PstarkDebugSigning=true est passé explicitement.
+      //      Une release signée en debug est installable pour tester, mais ne doit jamais être
+      //      publiée : d'où l'option explicite plutôt qu'un repli silencieux.
+      //   3. rien : l'APK sort non signée.
       signingConfig = signingConfigs.findByName("release")
+        ?: if (providers.gradleProperty("starkDebugSigning").orNull == "true") {
+          signingConfigs.getByName("debug")
+        } else {
+          null
+        }
     }
     debug {
       // À défaut de debug.keystore local, on retombe sur le keystore de debug généré par AGP.
