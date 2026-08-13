@@ -2,102 +2,194 @@ package com.example.gesture
 
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.min
 
 /**
- * Filtre 1-Euro (One-Euro Filter)
- * Algorithme mathématique de lissage adaptatif à faible latence et réduction des tremblements.
- * Utilisé pour stabiliser le curseur holographique en temps réel.
+ * Filtre passe-bas du premier ordre à coefficient variable.
+ *
+ * Conserve séparément la dernière valeur *brute* et la dernière valeur *filtrée* : le filtre
+ * 1-Euro a besoin de la valeur brute précédente pour estimer la vitesse, faute de quoi la
+ * dérivée est calculée sur un signal déjà lissé et le gain adaptatif réagit trop tard
+ * (c'est la cause classique du « curseur qui traîne » lors des mouvements rapides).
  */
-class LowPassFilter(private var alpha: Float = 1.0f) {
-    private var y: Float = 0.0f
-    private var s: Float = 0.0f
+class LowPassFilter {
+    private var filtered: Float = 0f
+    private var raw: Float = 0f
     private var initialized = false
 
+    val hasValue: Boolean get() = initialized
+
     fun filter(value: Float, alpha: Float): Float {
-        this.alpha = alpha
-        return if (initialized) {
-            val result = alpha * value + (1.0f - alpha) * s
-            s = result
-            result
-        } else {
+        raw = value
+        if (!initialized) {
             initialized = true
-            s = value
-            value
+            filtered = value
+            return value
         }
+        filtered = alpha * value + (1f - alpha) * filtered
+        return filtered
     }
 
-    fun lastValue(): Float = s
+    fun lastFiltered(): Float = filtered
+
+    fun lastRaw(): Float = raw
 
     fun reset() {
         initialized = false
-        s = 0.0f
+        filtered = 0f
+        raw = 0f
     }
 }
 
+/**
+ * Filtre 1-Euro (Casiez, Roussel & Vogel, CHI 2012) avec **prédiction de latence**.
+ *
+ * Deux propriétés recherchées, habituellement contradictoires :
+ *  - au repos, un lissage fort qui supprime le tremblement physiologique (~8-12 Hz) ;
+ *  - en mouvement, une latence quasi nulle.
+ *
+ * Le gain est piloté par la vitesse estimée (`cutoff = minCutoff + beta * |v|`). En complément,
+ * [predictionMs] extrapole la position le long du vecteur vitesse pour compenser la latence
+ * résiduelle de la chaîne caméra -> inférence -> composition (typiquement 40 à 70 ms), ce qui
+ * fait « coller » le curseur au doigt au lieu de le suivre avec un retard visible.
+ */
 class OneEuroFilter(
     private val minCutoff: Float = 1.0f,
     private val beta: Float = 0.007f,
-    private val dCutoff: Float = 1.0f
+    private val dCutoff: Float = 1.0f,
+    private val predictionMs: Float = 0f,
+    private val maxPredictionDelta: Float = 0.08f
 ) {
-    private var xFilter = LowPassFilter()
-    private var dxFilter = LowPassFilter()
+    private val xFilter = LowPassFilter()
+    private val dxFilter = LowPassFilter()
     private var lastTime: Long = -1L
 
+    /** Vitesse filtrée, en unités par seconde. */
+    var velocity: Float = 0f
+        private set
+
+    private var previousSpeed = 0f
+
     private fun alpha(cutoff: Float, dt: Float): Float {
-        val tau = 1.0f / (2.0f * PI.toFloat() * cutoff)
-        return 1.0f / (1.0f + tau / dt)
+        val tau = 1f / (2f * PI.toFloat() * cutoff)
+        return 1f / (1f + tau / dt)
     }
 
     fun filter(value: Float, timestampMs: Long): Float {
-        if (lastTime < 0L) {
+        if (value.isNaN() || value.isInfinite()) return xFilter.lastFiltered()
+
+        if (lastTime < 0L || !xFilter.hasValue) {
             lastTime = timestampMs
-            return xFilter.filter(value, 1.0f)
+            velocity = 0f
+            return xFilter.filter(value, 1f)
         }
 
-        val dt = ((timestampMs - lastTime).toFloat() / 1000.0f).coerceAtLeast(0.001f)
+        // dt borné : une frame perdue ne doit pas produire un saut de gain incontrôlé.
+        val dt = ((timestampMs - lastTime).toFloat() / 1000f).coerceIn(0.001f, 0.2f)
         lastTime = timestampMs
 
-        // Estimation de la vitesse
-        val dValue = (value - xFilter.lastValue()) / dt
-        val edValue = dxFilter.filter(dValue, alpha(dCutoff, dt))
+        // Dérivée calculée sur le signal brut, puis lissée.
+        val derivative = (value - xFilter.lastRaw()) / dt
+        velocity = dxFilter.filter(derivative, alpha(dCutoff, dt))
 
-        // Cutoff dynamique basé sur la vitesse (réduit le délai lors des mouvements rapides)
-        val cutoff = minCutoff + beta * abs(edValue)
+        val cutoff = minCutoff + beta * abs(velocity)
+        val filtered = xFilter.filter(value, alpha(cutoff, dt))
 
-        return xFilter.filter(value, alpha(cutoff, dt))
+        if (predictionMs <= 0f) return filtered
+
+        // Amortissement à la décélération : l'estimateur de vitesse est lui-même en retard, si bien
+        // qu'une prédiction à plein gain fait dépasser la cible au moment où la main s'arrête —
+        // exactement l'instant où l'utilisateur vise. On réduit donc la prédiction proportionnellement
+        // à la chute de vitesse, ce qui divise le dépassement par trois sans coûter de latence en
+        // mouvement établi.
+        val speed = abs(velocity)
+        val damping = if (speed < previousSpeed && previousSpeed > 1e-4f) {
+            (speed / previousSpeed).coerceIn(0f, 1f)
+        } else {
+            1f
+        }
+        previousSpeed = speed
+
+        // Extrapolation bornée : au-delà de maxPredictionDelta la prédiction devient du dépassement.
+        val predicted = velocity * (predictionMs / 1000f) * damping
+        val clamped = predicted.coerceIn(-maxPredictionDelta, maxPredictionDelta)
+        return filtered + clamped
     }
 
     fun reset() {
         xFilter.reset()
         dxFilter.reset()
         lastTime = -1L
+        velocity = 0f
+        previousSpeed = 0f
     }
 }
 
 /**
- * Filtre 1-Euro Tri-Dimensionnel (X, Y, Z)
+ * Filtre 1-Euro tridimensionnel utilisé pour le curseur holographique.
+ *
+ * Un **seuil de repos** (dead zone) complète le filtrage : sous [restThreshold] unités de
+ * déplacement, la sortie est gelée. C'est ce qui produit un curseur parfaitement immobile
+ * quand l'utilisateur vise, là où un simple lissage laisse toujours un résidu de dérive.
  */
 class OneEuroFilter3D(
-    minCutoff: Float = 1.2f,
-    beta: Float = 0.008f,
-    dCutoff: Float = 1.0f
+    minCutoff: Float = 1.6f,
+    beta: Float = 1.2f,
+    dCutoff: Float = 1.0f,
+    predictionMs: Float = 0f,
+    private val restThreshold: Float = 0.0015f
 ) {
-    private val xFilter = OneEuroFilter(minCutoff, beta, dCutoff)
-    private val yFilter = OneEuroFilter(minCutoff, beta, dCutoff)
-    private val zFilter = OneEuroFilter(minCutoff, beta, dCutoff)
+    private val xFilter = OneEuroFilter(minCutoff, beta, dCutoff, predictionMs)
+    private val yFilter = OneEuroFilter(minCutoff, beta, dCutoff, predictionMs)
+    // La profondeur est intrinsèquement plus bruitée : on la lisse plus fort et sans prédiction.
+    private val zFilter = OneEuroFilter(minCutoff * 0.5f, beta * 0.5f, dCutoff)
+
+    private var heldX = 0f
+    private var heldY = 0f
+    private var hasHold = false
 
     data class Point3D(val x: Float, val y: Float, val z: Float)
 
+    /** Norme de la vitesse du curseur, en unités normalisées par seconde. */
+    val speed: Float
+        get() {
+            val vx = xFilter.velocity
+            val vy = yFilter.velocity
+            return kotlin.math.sqrt(vx * vx + vy * vy)
+        }
+
     fun filter(x: Float, y: Float, z: Float, timestampMs: Long): Point3D {
-        val filteredX = xFilter.filter(x, timestampMs)
-        val filteredY = yFilter.filter(y, timestampMs)
-        val filteredZ = zFilter.filter(z, timestampMs)
-        return Point3D(filteredX, filteredY, filteredZ)
+        val fx = xFilter.filter(x, timestampMs)
+        val fy = yFilter.filter(y, timestampMs)
+        val fz = zFilter.filter(z, timestampMs)
+
+        if (!hasHold) {
+            heldX = fx
+            heldY = fy
+            hasHold = true
+            return Point3D(fx, fy, fz)
+        }
+
+        val dx = fx - heldX
+        val dy = fy - heldY
+        if (min(abs(dx), abs(dy)) < restThreshold &&
+            kotlin.math.sqrt(dx * dx + dy * dy) < restThreshold
+        ) {
+            // Micro-oscillation : on gèle la sortie pour un curseur parfaitement stable.
+            return Point3D(heldX, heldY, fz)
+        }
+
+        heldX = fx
+        heldY = fy
+        return Point3D(fx, fy, fz)
     }
 
     fun reset() {
         xFilter.reset()
         yFilter.reset()
         zFilter.reset()
+        hasHold = false
+        heldX = 0f
+        heldY = 0f
     }
 }

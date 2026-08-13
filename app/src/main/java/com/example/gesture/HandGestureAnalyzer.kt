@@ -3,11 +3,8 @@ package com.example.gesture
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
-import android.graphics.PointF
-import android.graphics.Rect
 import android.os.SystemClock
-import androidx.annotation.OptIn
-import androidx.camera.core.ExperimentalGetImage
+import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -16,32 +13,34 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
-import kotlin.math.atan2
-import kotlin.math.hypot
-import kotlin.math.sqrt
 
-enum class GestureType {
-    IDLE,
-    OPEN_PALM,
-    PINCH,
-    FIST,
-    SWIPE_LEFT,
-    SWIPE_RIGHT
-}
-
+/** État complet publié à chaque frame analysée. */
 data class HandGestureState(
     val isHandDetected: Boolean = false,
-    val cursorX: Float = 0.5f,       // Normalisé 0.0 -> 1.0 (Lissé)
-    val cursorY: Float = 0.5f,       // Normalisé 0.0 -> 1.0 (Lissé)
-    val cursorZ: Float = 0.5f,       // Normalisé 0.0 -> 1.0 (Profondeur estimée)
+    /** Curseur lissé, normalisé 0..1 dans l'espace écran. */
+    val cursorX: Float = 0.5f,
+    val cursorY: Float = 0.5f,
+    /** Profondeur estimée : 0 = main proche, 1 = main éloignée. */
+    val cursorZ: Float = 0.5f,
+    /** Position brute (avant lissage), utile au diagnostic. */
     val rawCursorX: Float = 0.5f,
     val rawCursorY: Float = 0.5f,
     val gesture: GestureType = GestureType.IDLE,
-    val pinchRatio: Float = 1.0f,
-    val palmRotationDeg: Float = 0.0f,
-    val landmarks: List<PointF> = emptyList(),
+    /** Force analogique du pincement, 0..1. */
+    val pinchStrength: Float = 0f,
+    /** Confiance globale de la détection, 0..1. */
+    val confidence: Float = 0f,
+    val palmRotationDeg: Float = 0f,
+    val landmarks: List<Landmark> = emptyList(),
+    /** Fréquence de traitement effective (images par seconde). */
     val fps: Int = 0,
-    val isSimulationMode: Boolean = false
+    /** Latence d'inférence médiane, en millisecondes. */
+    val latencyMs: Int = 0,
+    val isSimulationMode: Boolean = false,
+    /** Vrai si le modèle de vision n'a pas pu être chargé : le suivi de main est indisponible. */
+    val isVisionUnavailable: Boolean = false,
+    /** Front montant du pincement : une seule frame, à consommer comme un clic. */
+    val pinchClickTick: Long = 0L
 )
 
 interface HandGestureListener {
@@ -49,85 +48,153 @@ interface HandGestureListener {
 }
 
 /**
- * Analyseur de flux vidéo CameraX exécutant Google MediaPipe Hand Landmarker
- * pour extraire les 21 landmarks et traduire la géométrie en gestes dynamiques (Pinch, Fist, Swipe, Rotation).
+ * Analyseur CameraX exécutant MediaPipe Hand Landmarker et traduisant les 21 points de repère
+ * en gestes stables.
+ *
+ * Optimisations du chemin de frame (exécuté 30 fois par seconde, donc critique) :
+ *  - sortie caméra en RGBA_8888 : supprime la conversion YUV -> RGB logicielle par image ;
+ *  - bitmap source réutilisé d'une frame à l'autre : une seule allocation résiduelle
+ *    (l'image pivotée, que MediaPipe conserve de façon asynchrone) au lieu de trois ;
+ *  - rotation, miroir et recadrage fusionnés en une seule matrice ;
+ *  - horodatages strictement monotones, exigés par le mode LIVE_STREAM ;
+ *  - delegate GPU avec repli automatique sur CPU.
  */
 class HandGestureAnalyzer(
     private val context: Context,
     private val listener: HandGestureListener
 ) : ImageAnalysis.Analyzer {
 
-    private var handLandmarker: HandLandmarker? = null
-    private val filter3D = OneEuroFilter3D(minCutoff = 1.2f, beta = 0.015f)
+    private companion object {
+        const val TAG = "HandGestureAnalyzer"
+        const val MODEL_ASSET = "hand_landmarker.task"
 
-    private var lastFrameTimestamp = SystemClock.uptimeMillis()
+        /**
+         * Prédiction de latence appliquée au curseur. Correspond à la latence typique de la
+         * chaîne capteur -> inférence -> composition sur un appareil milieu de gamme.
+         */
+        const val CURSOR_PREDICTION_MS = 40f
+
+        /** Nombre d'erreurs d'inférence consécutives avant de rétrograder le delegate GPU. */
+        const val GPU_FAILURE_THRESHOLD = 5
+    }
+
+    private var handLandmarker: HandLandmarker? = null
+    private var visionUnavailable = false
+    private var activeDelegate: Delegate? = null
+
+    /**
+     * Incrémenté depuis le callback d'erreur de MediaPipe (thread d'inférence), lu depuis le
+     * thread d'analyse : d'où le @Volatile.
+     */
+    @Volatile
+    private var consecutiveInferenceErrors = 0
+
+    private val classifier = GestureClassifier()
+    private val cursorMapper = CursorMapper()
+    private val cursorFilter = OneEuroFilter3D(
+        minCutoff = 1.6f,
+        beta = 1.2f,
+        predictionMs = CURSOR_PREDICTION_MS
+    )
+
+    // Bitmap source réutilisé (jamais transmis à MediaPipe, donc sûr à muter).
+    private var reusableSource: Bitmap? = null
+    private val frameMatrix = Matrix()
+    private var lastRotationDegrees = Int.MIN_VALUE
+
+    private var lastTimestamp = 0L
     private var frameCount = 0
     private var currentFps = 0
-    private var fpsTimer = SystemClock.uptimeMillis()
+    private var fpsWindowStart = SystemClock.uptimeMillis()
 
-    // Historique pour détection de Swipe
-    private val positionHistory = mutableListOf<Pair<Long, Float>>()
-    private var lastSwipeTime = 0L
+    private var inferenceStartedAt = 0L
+    private var smoothedLatencyMs = 0f
 
-    // Mode simulation sans caméra (pour tests rapides ou secours)
     private var isSimulationActive = false
+    private var pinchClickTick = 0L
+    private var wasHandDetected = false
+    private var lastIdleEmit = 0L
+    private var visionUnavailableNotified = false
 
     init {
         setupMediaPipe()
     }
 
     private fun setupMediaPipe() {
-        try {
-            val baseOptionsBuilder = BaseOptions.builder()
-                .setDelegate(Delegate.CPU)
-
-            // Détection si le modèle est présent dans les assets
-            val modelPath = "hand_landmarker.task"
-            val hasAsset = context.assets.list("")?.contains(modelPath) == true
-
-            if (hasAsset) {
-                baseOptionsBuilder.setModelAssetPath(modelPath)
-                val options = HandLandmarker.HandLandmarkerOptions.builder()
-                    .setBaseOptions(baseOptionsBuilder.build())
-                    .setMinHandDetectionConfidence(0.5f)
-                    .setMinHandPresenceConfidence(0.5f)
-                    .setMinTrackingConfidence(0.5f)
-                    .setNumHands(1)
-                    .setRunningMode(RunningMode.LIVE_STREAM)
-                    .setResultListener { result, image ->
-                        processHandResult(result, image.width, image.height)
-                    }
-                    .setErrorListener { error ->
-                        // Fallback silencieux en cas de charge GPU/CPU
-                    }
-                    .build()
-
-                handLandmarker = HandLandmarker.createFromOptions(context, options)
-            }
+        val hasModel = try {
+            context.assets.list("")?.contains(MODEL_ASSET) == true
         } catch (e: Exception) {
-            e.printStackTrace()
-            // En cas d'erreur d'initialisation MediaPipe, l'analyseur bascule sur l'algorithme heuristique
+            Log.w(TAG, "Lecture des assets impossible", e)
+            false
         }
+
+        if (!hasModel) {
+            Log.e(TAG, "Modèle $MODEL_ASSET absent des assets : suivi de main indisponible.")
+            visionUnavailable = true
+            return
+        }
+
+        // Le delegate GPU divise environ par deux la latence d'inférence quand il est disponible ;
+        // certains pilotes le refusent, d'où le repli CPU silencieux.
+        handLandmarker = createLandmarker(Delegate.GPU)?.also { activeDelegate = Delegate.GPU }
+            ?: createLandmarker(Delegate.CPU)?.also { activeDelegate = Delegate.CPU }
+        if (handLandmarker == null) {
+            Log.e(TAG, "Initialisation de HandLandmarker impossible (GPU et CPU).")
+            visionUnavailable = true
+        }
+    }
+
+    private fun createLandmarker(delegate: Delegate): HandLandmarker? = try {
+        val baseOptions = BaseOptions.builder()
+            .setDelegate(delegate)
+            .setModelAssetPath(MODEL_ASSET)
+            .build()
+
+        val options = HandLandmarker.HandLandmarkerOptions.builder()
+            .setBaseOptions(baseOptions)
+            // Seuils relevés par rapport aux valeurs par défaut : on préfère perdre une frame
+            // douteuse plutôt que piloter le curseur avec une détection incertaine.
+            .setMinHandDetectionConfidence(0.6f)
+            .setMinHandPresenceConfidence(0.6f)
+            .setMinTrackingConfidence(0.6f)
+            .setNumHands(1)
+            .setRunningMode(RunningMode.LIVE_STREAM)
+            .setResultListener { result, _ -> processHandResult(result) }
+            .setErrorListener { error ->
+                consecutiveInferenceErrors++
+                Log.w(TAG, "Erreur d'inférence MediaPipe: $error")
+            }
+            .build()
+
+        HandLandmarker.createFromOptions(context, options)
+    } catch (e: Throwable) {
+        Log.w(TAG, "Delegate $delegate indisponible: ${e.message}")
+        null
     }
 
     fun setSimulationMode(enabled: Boolean) {
-        this.isSimulationActive = enabled
-        if (!enabled) {
-            filter3D.reset()
-        }
+        isSimulationActive = enabled
+        cursorFilter.reset()
+        classifier.reset()
     }
 
-    fun updateSimulatedPosition(xNormalized: Float, yNormalized: Float, isPinching: Boolean, isFist: Boolean) {
+    fun updateSimulatedPosition(
+        xNormalized: Float,
+        yNormalized: Float,
+        isPinching: Boolean,
+        isFist: Boolean
+    ) {
         if (!isSimulationActive) return
 
-        val now = SystemClock.uptimeMillis()
-        val smoothed = filter3D.filter(xNormalized, yNormalized, 0.5f, now)
+        val now = nextTimestamp()
+        val smoothed = cursorFilter.filter(xNormalized, yNormalized, 0.5f, now)
 
         val gesture = when {
             isPinching -> GestureType.PINCH
             isFist -> GestureType.FIST
             else -> GestureType.OPEN_PALM
         }
+        if (isPinching) pinchClickTick = now
 
         listener.onHandGestureUpdated(
             HandGestureState(
@@ -138,321 +205,209 @@ class HandGestureAnalyzer(
                 rawCursorX = xNormalized,
                 rawCursorY = yNormalized,
                 gesture = gesture,
-                pinchRatio = if (isPinching) 0.15f else 0.8f,
-                palmRotationDeg = 0f,
-                landmarks = emptyList(),
+                pinchStrength = if (isPinching) 1f else 0f,
+                confidence = 1f,
                 fps = 60,
-                isSimulationActive
+                latencyMs = 0,
+                isSimulationMode = true,
+                pinchClickTick = pinchClickTick
             )
         )
     }
 
-    @OptIn(ExperimentalGetImage::class)
     override fun analyze(imageProxy: ImageProxy) {
+        try {
+            updateFpsCounter()
+
+            if (isSimulationActive || visionUnavailable) {
+                if (visionUnavailable) emitVisionUnavailable()
+                return
+            }
+
+            demoteToCpuIfGpuFailing()
+
+            val landmarker = handLandmarker ?: return
+            val bitmap = buildUprightBitmap(imageProxy) ?: return
+
+            inferenceStartedAt = SystemClock.uptimeMillis()
+            landmarker.detectAsync(BitmapImageBuilder(bitmap).build(), nextTimestamp())
+        } catch (e: Throwable) {
+            Log.w(TAG, "Frame ignorée: ${e.message}")
+        } finally {
+            imageProxy.close()
+        }
+    }
+
+    /**
+     * Certains pilotes acceptent la création du delegate GPU puis échouent à chaque inférence.
+     * Le cas est indétectable à l'initialisation ; on le rattrape ici, sur le thread d'analyse
+     * (le seul où reconstruire le détecteur est sûr), après quelques échecs consécutifs.
+     */
+    private fun demoteToCpuIfGpuFailing() {
+        if (activeDelegate != Delegate.GPU) return
+        if (consecutiveInferenceErrors < GPU_FAILURE_THRESHOLD) return
+
+        Log.w(TAG, "Delegate GPU défaillant après $consecutiveInferenceErrors erreurs : repli sur CPU")
+        handLandmarker?.close()
+        activeDelegate = Delegate.CPU
+        consecutiveInferenceErrors = 0
+        handLandmarker = createLandmarker(Delegate.CPU)
+        if (handLandmarker == null) {
+            visionUnavailable = true
+            activeDelegate = null
+        }
+    }
+
+    /**
+     * Convertit la frame caméra en bitmap redressé et mis en miroir.
+     *
+     * Le miroir est appliqué ici plutôt que sur les coordonnées de sortie : MediaPipe
+     * détermine aussi la latéralité (main gauche/droite) à partir de l'image, un miroir
+     * appliqué après coup l'inverserait.
+     */
+    private fun buildUprightBitmap(imageProxy: ImageProxy): Bitmap? {
+        val plane = imageProxy.planes.getOrNull(0) ?: return null
+        val width = imageProxy.width
+        val height = imageProxy.height
+        if (width <= 0 || height <= 0) return null
+
+        val pixelStride = plane.pixelStride
+        if (pixelStride != 4) {
+            // Format inattendu (la caméra doit être configurée en RGBA_8888).
+            Log.w(TAG, "pixelStride=$pixelStride inattendu, frame ignorée")
+            return null
+        }
+
+        // Le buffer peut être complété à droite : on alloue à la largeur réelle des lignes,
+        // puis on recadre à la largeur utile.
+        val paddedWidth = plane.rowStride / pixelStride
+        var source = reusableSource
+        if (source == null || source.width != paddedWidth || source.height != height) {
+            source?.recycle()
+            source = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
+            reusableSource = source
+        }
+
+        plane.buffer.rewind()
+        source.copyPixelsFromBuffer(plane.buffer)
+
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        if (rotationDegrees != lastRotationDegrees) {
+            lastRotationDegrees = rotationDegrees
+            frameMatrix.reset()
+            frameMatrix.postRotate(rotationDegrees.toFloat())
+            frameMatrix.postScale(-1f, 1f, width / 2f, height / 2f)
+        }
+
+        return Bitmap.createBitmap(source, 0, 0, width, height, frameMatrix, true)
+    }
+
+    private fun updateFpsCounter() {
         val now = SystemClock.uptimeMillis()
         frameCount++
-        if (now - fpsTimer >= 1000) {
+        if (now - fpsWindowStart >= 1000) {
             currentFps = frameCount
             frameCount = 0
-            fpsTimer = now
+            fpsWindowStart = now
         }
-
-        if (isSimulationActive) {
-            imageProxy.close()
-            return
-        }
-
-        val mediaImage = imageProxy.image
-        if (mediaImage != null && handLandmarker != null) {
-            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-            val bitmap = imageProxy.toBitmap()
-
-            val matrix = Matrix().apply {
-                postRotate(rotationDegrees.toFloat())
-                // Effet miroir pour la caméra frontale
-                postScale(-1f, 1f, bitmap.width / 2f, bitmap.height / 2f)
-            }
-
-            val rotatedBitmap = Bitmap.createBitmap(
-                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-            )
-
-            val mpImage = BitmapImageBuilder(rotatedBitmap).build()
-            handLandmarker?.detectAsync(mpImage, now)
-        } else {
-            // Algorithme géométrique alternatif lorsque le modèle .task externe n'est pas pré-chargé
-            analyzeImageDirectly(imageProxy, now)
-        }
-
-        imageProxy.close()
     }
 
-    private fun analyzeImageDirectly(imageProxy: ImageProxy, now: Long) {
-        // Algorithme de vision par ordinateur léger et optimisé
-        var sumX = 0f
-        var sumY = 0f
-        var count = 0
-        var minX = Float.MAX_VALUE
-        var maxX = 0f
-        var minY = Float.MAX_VALUE
-        var maxY = 0f
-
-        try {
-            val plane = imageProxy.planes[0]
-            val buffer = plane.buffer
-            val width = imageProxy.width
-            val height = imageProxy.height
-            val rowStride = plane.rowStride
-
-            // Grille d'échantillonnage 24x24 à haute efficacité
-            val stepX = (width / 24).coerceAtLeast(1)
-            val stepY = (height / 24).coerceAtLeast(1)
-
-            for (y in 0 until height step stepY) {
-                val rowOffset = y * rowStride
-                for (x in 0 until width step stepX) {
-                    val index = rowOffset + x
-                    if (index < buffer.capacity()) {
-                        val pixel = buffer.get(index).toInt() and 0xFF
-                        if (pixel > 105) { // Seuil de détection de contraste/luminosité
-                            val fx = x.toFloat()
-                            val fy = y.toFloat()
-                            sumX += fx
-                            sumY += fy
-                            count++
-
-                            if (fx < minX) minX = fx
-                            if (fx > maxX) maxX = fx
-                            if (fy < minY) minY = fy
-                            if (fy > maxY) maxY = fy
-                        }
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-
-        val rawX: Float
-        val rawY: Float
-        val handDetected: Boolean
-        val gesture: GestureType
-        val handSpread: Float
-
-        if (count >= 12) {
-            val imgW = imageProxy.width.toFloat()
-            val imgH = imageProxy.height.toFloat()
-
-            // Effet miroir caméra frontale
-            rawX = 1.0f - (sumX / count) / imgW
-            rawY = (sumY / count) / imgH
-            handDetected = true
-
-            val spreadX = (maxX - minX) / imgW
-            val spreadY = (maxY - minY) / imgH
-            handSpread = (spreadX + spreadY) / 2f
-
-            // Classification dynamique du geste selon la concentration des pixels
-            val isCompact = handSpread < 0.18f
-            val isLarge = handSpread > 0.35f
-
-            // Swipe Detection
-            positionHistory.add(Pair(now, rawX))
-            positionHistory.removeAll { (time, _) -> now - time > 350 }
-
-            var swipeGesture = GestureType.IDLE
-            if (positionHistory.size >= 3 && now - lastSwipeTime > 600) {
-                val oldestX = positionHistory.first().second
-                val newestX = positionHistory.last().second
-                val dx = newestX - oldestX
-
-                if (dx > 0.32f) {
-                    swipeGesture = GestureType.SWIPE_RIGHT
-                    lastSwipeTime = now
-                } else if (dx < -0.32f) {
-                    swipeGesture = GestureType.SWIPE_LEFT
-                    lastSwipeTime = now
-                }
-            }
-
-            gesture = when {
-                swipeGesture != GestureType.IDLE -> swipeGesture
-                isCompact -> GestureType.PINCH
-                count in 12..25 -> GestureType.FIST
-                else -> GestureType.OPEN_PALM
-            }
-        } else {
-            rawX = 0.5f
-            rawY = 0.5f
-            handDetected = false
-            gesture = GestureType.IDLE
-            handSpread = 0.22f
-        }
-
-        // Filtrage 1-Euro 3D ultra-lisse sans saccade
-        val smoothed = filter3D.filter(rawX.coerceIn(0f, 1f), rawY.coerceIn(0f, 1f), handSpread, now)
-        val landmarks = if (handDetected) createHandSkeleton(smoothed.x, smoothed.y, size = handSpread.coerceIn(0.12f, 0.35f)) else emptyList()
-
-        listener.onHandGestureUpdated(
-            HandGestureState(
-                isHandDetected = handDetected,
-                cursorX = smoothed.x.coerceIn(0f, 1f),
-                cursorY = smoothed.y.coerceIn(0f, 1f),
-                cursorZ = smoothed.z,
-                rawCursorX = rawX,
-                rawCursorY = rawY,
-                gesture = gesture,
-                pinchRatio = if (gesture == GestureType.PINCH) 0.2f else 0.6f,
-                landmarks = landmarks,
-                fps = currentFps,
-                isSimulationMode = false
-            )
-        )
-    }
-
-    private fun createHandSkeleton(cx: Float, cy: Float, size: Float = 0.22f): List<PointF> {
-        val wrist = PointF(cx, (cy + size * 0.6f).coerceIn(0f, 1f))
-        
-        // Thumb 1..4
-        val t1 = PointF(cx - size * 0.25f, cy + size * 0.35f)
-        val t2 = PointF(cx - size * 0.35f, cy + size * 0.15f)
-        val t3 = PointF(cx - size * 0.40f, cy - size * 0.05f)
-        val t4 = PointF(cx - size * 0.42f, cy - size * 0.25f)
-        
-        // Index 5..8 (Cursor Tip = landmark 8)
-        val i5 = PointF(cx - size * 0.18f, cy - size * 0.10f)
-        val i6 = PointF(cx - size * 0.20f, cy - size * 0.35f)
-        val i7 = PointF(cx - size * 0.21f, cy - size * 0.55f)
-        val i8 = PointF(cx - size * 0.22f, cy - size * 0.75f)
-        
-        // Middle 9..12
-        val m9 = PointF(cx, cy - size * 0.12f)
-        val m10 = PointF(cx, cy - size * 0.40f)
-        val m11 = PointF(cx, cy - size * 0.62f)
-        val m12 = PointF(cx, cy - size * 0.82f)
-        
-        // Ring 13..16
-        val r13 = PointF(cx + size * 0.18f, cy - size * 0.10f)
-        val r14 = PointF(cx + size * 0.19f, cy - size * 0.36f)
-        val r15 = PointF(cx + size * 0.20f, cy - size * 0.58f)
-        val r16 = PointF(cx + size * 0.21f, cy - size * 0.75f)
-        
-        // Pinky 17..20
-        val p17 = PointF(cx + size * 0.32f, cy + size * 0.05f)
-        val p18 = PointF(cx + size * 0.34f, cy - size * 0.18f)
-        val p19 = PointF(cx + size * 0.35f, cy - size * 0.38f)
-        val p20 = PointF(cx + size * 0.36f, cy - size * 0.55f)
-
-        return listOf(
-            wrist, t1, t2, t3, t4,
-            i5, i6, i7, i8,
-            m9, m10, m11, m12,
-            r13, r14, r15, r16,
-            p17, p18, p19, p20
-        ).map { PointF(it.x.coerceIn(0f, 1f), it.y.coerceIn(0f, 1f)) }
-    }
-
-    private fun processHandResult(result: HandLandmarkerResult, frameWidth: Int, frameHeight: Int) {
+    /** MediaPipe en mode LIVE_STREAM exige des horodatages strictement croissants. */
+    private fun nextTimestamp(): Long {
         val now = SystemClock.uptimeMillis()
-        val landmarksList = result.landmarks()
+        lastTimestamp = if (now > lastTimestamp) now else lastTimestamp + 1
+        return lastTimestamp
+    }
 
-        if (landmarksList.isNullOrEmpty() || landmarksList[0].isEmpty()) {
-            listener.onHandGestureUpdated(
-                HandGestureState(
-                    isHandDetected = false,
-                    gesture = GestureType.IDLE,
-                    fps = currentFps
-                )
-            )
+    private fun processHandResult(result: HandLandmarkerResult) {
+        consecutiveInferenceErrors = 0
+        val now = SystemClock.uptimeMillis()
+        if (inferenceStartedAt > 0L) {
+            val latency = (now - inferenceStartedAt).toFloat()
+            // Moyenne mobile exponentielle : évite un affichage de latence qui clignote.
+            smoothedLatencyMs = if (smoothedLatencyMs == 0f) latency
+            else smoothedLatencyMs * 0.8f + latency * 0.2f
+        }
+
+        val hands = result.landmarks()
+        val raw = hands?.firstOrNull()
+
+        if (raw.isNullOrEmpty()) {
+            emitNoHand(now)
             return
         }
 
-        val handLandmarks = landmarksList[0] // Première main détectée
+        val landmarks = ArrayList<Landmark>(raw.size)
+        for (p in raw) landmarks.add(Landmark(p.x(), p.y(), p.z()))
 
-        // Convertir en liste de PointF
-        val points = handLandmarks.map { PointF(it.x(), it.y()) }
+        val metrics = HandGeometry.analyze(landmarks)
+        val gestureResult = classifier.update(metrics, now)
 
-        // Landmark 0: Poignet, Landmark 4: Pouce, Landmark 8: Bout de l'index
-        val wrist = points[0]
-        val thumbTip = points[4]
-        val indexTip = points[8]
-        val middleTip = points[12]
-        val ringTip = points[16]
-        val pinkyTip = points[20]
-
-        val indexMcp = points[5]
-        val middleMcp = points[9]
-
-        // 1. Position du curseur (Bout de l'index)
-        val rawX = indexTip.x.coerceIn(0f, 1f)
-        val rawY = indexTip.y.coerceIn(0f, 1f)
-
-        // 2. Calcul de la taille de la paume (Poignet vers Middle MCP) pour normaliser les distances
-        val palmSize = hypot(middleMcp.x - wrist.x, middleMcp.y - wrist.y).coerceAtLeast(0.01f)
-
-        // 3. Profondeur Z estimée inversement proportionnelle à la taille de la paume
-        val estimatedZ = (0.15f / palmSize).coerceIn(0.1f, 1.0f)
-
-        // Lissage du curseur via Filtre 1-Euro
-        val smoothed3D = filter3D.filter(rawX, rawY, estimatedZ, now)
-
-        // 4. Calcul de la distance Pinch (Pouce + Index)
-        val pinchDistance = hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y)
-        val pinchRatio = pinchDistance / palmSize
-
-        val isPinch = pinchRatio < 0.32f
-
-        // 5. Calcul Poing (Fist)
-        val indexFolded = hypot(indexTip.x - wrist.x, indexTip.y - wrist.y) < palmSize * 1.1f
-        val middleFolded = hypot(middleTip.x - wrist.x, middleTip.y - wrist.y) < palmSize * 1.1f
-        val ringFolded = hypot(ringTip.x - wrist.x, ringTip.y - wrist.y) < palmSize * 1.1f
-        val pinkyFolded = hypot(pinkyTip.x - wrist.x, pinkyTip.y - wrist.y) < palmSize * 1.1f
-
-        val isFist = indexFolded && middleFolded && ringFolded && pinkyFolded
-
-        // 6. Orientation et rotation de la paume (angle en degrés)
-        val angleRad = atan2((middleMcp.y - wrist.y).toDouble(), (middleMcp.x - wrist.x).toDouble())
-        val palmAngleDeg = Math.toDegrees(angleRad).toFloat()
-
-        // 7. Détection de Swipe Aérien
-        var swipeGesture = GestureType.IDLE
-        positionHistory.add(Pair(now, rawX))
-        positionHistory.removeAll { (time, _) -> now - time > 400 } // Conserver 400ms d'historique
-
-        if (positionHistory.size >= 3 && now - lastSwipeTime > 700) {
-            val oldestX = positionHistory.first().second
-            val newestX = positionHistory.last().second
-            val dx = newestX - oldestX
-
-            if (dx > 0.35f) {
-                swipeGesture = GestureType.SWIPE_RIGHT
-                lastSwipeTime = now
-            } else if (dx < -0.35f) {
-                swipeGesture = GestureType.SWIPE_LEFT
-                lastSwipeTime = now
-            }
+        if (metrics == null) {
+            emitNoHand(now)
+            return
         }
 
-        // Déterminer le geste principal
-        val finalGesture = when {
-            isPinch -> GestureType.PINCH
-            isFist -> GestureType.FIST
-            swipeGesture != GestureType.IDLE -> swipeGesture
-            else -> GestureType.OPEN_PALM
-        }
+        if (classifier.pinchJustClosed) pinchClickTick = now
+        wasHandDetected = true
+
+        val (mappedX, mappedY) = cursorMapper.map(metrics.pointerX, metrics.pointerY)
+        val smoothed = cursorFilter.filter(mappedX, mappedY, metrics.depth, now)
 
         listener.onHandGestureUpdated(
             HandGestureState(
                 isHandDetected = true,
-                cursorX = smoothed3D.x.coerceIn(0f, 1f),
-                cursorY = smoothed3D.y.coerceIn(0f, 1f),
-                cursorZ = smoothed3D.z,
-                rawCursorX = rawX,
-                rawCursorY = rawY,
-                gesture = finalGesture,
-                pinchRatio = pinchRatio,
-                palmRotationDeg = palmAngleDeg,
-                landmarks = points,
+                cursorX = smoothed.x.coerceIn(0f, 1f),
+                cursorY = smoothed.y.coerceIn(0f, 1f),
+                cursorZ = smoothed.z.coerceIn(0f, 1f),
+                rawCursorX = metrics.pointerX,
+                rawCursorY = metrics.pointerY,
+                gesture = gestureResult.gesture,
+                pinchStrength = gestureResult.pinchStrength,
+                confidence = gestureResult.confidence,
+                palmRotationDeg = metrics.palmRotationDeg,
+                landmarks = landmarks,
                 fps = currentFps,
-                isSimulationMode = false
+                latencyMs = smoothedLatencyMs.toInt(),
+                isSimulationMode = false,
+                pinchClickTick = pinchClickTick
+            )
+        )
+    }
+
+    private fun emitNoHand(now: Long) {
+        val result = classifier.update(null, now)
+        if (result.gesture == GestureType.IDLE) cursorFilter.reset()
+
+        // Sans main à suivre, l'état ne varie plus : on limite les publications à 4 Hz au lieu
+        // de 30 Hz pour éviter des recompositions inutiles de toute l'interface.
+        if (wasHandDetected) {
+            wasHandDetected = false
+        } else if (now - lastIdleEmit < 250L) {
+            return
+        }
+        lastIdleEmit = now
+
+        listener.onHandGestureUpdated(
+            HandGestureState(
+                isHandDetected = false,
+                gesture = GestureType.IDLE,
+                fps = currentFps,
+                latencyMs = smoothedLatencyMs.toInt(),
+                pinchClickTick = pinchClickTick
+            )
+        )
+    }
+
+    private fun emitVisionUnavailable() {
+        if (visionUnavailableNotified) return
+        visionUnavailableNotified = true
+        listener.onHandGestureUpdated(
+            HandGestureState(
+                isHandDetected = false,
+                gesture = GestureType.IDLE,
+                fps = currentFps,
+                isVisionUnavailable = true
             )
         )
     }
@@ -460,5 +415,8 @@ class HandGestureAnalyzer(
     fun close() {
         handLandmarker?.close()
         handLandmarker = null
+        activeDelegate = null
+        reusableSource?.recycle()
+        reusableSource = null
     }
 }

@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Stark Launcher</string>
+    <string name="accessibility_service_label">Stark HUD — commandes gestuelles</string>
+    <string name="accessibility_service_description">Permet au Stark HUD Launcher d\'exécuter les actions système Retour, Accueil et Applications récentes à partir des gestes de la main détectés par la caméra.</string>
 </resources>

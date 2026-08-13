@@ -41,8 +41,11 @@ android {
 
   buildTypes {
     release {
-      isCrunchPngs = false
-      isMinifyEnabled = false
+      isCrunchPngs = true
+      // R8 en mode complet : suppression du code et des ressources inutilisés. Les règles de
+      // conservation nécessaires à MediaPipe et TensorFlow Lite sont dans proguard-rules.pro.
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }
@@ -55,6 +58,23 @@ android {
   buildFeatures {
     compose = true
     buildConfig = true
+  }
+  androidResources {
+    // Le modèle .task est une archive : la recompresser dans l'APK empêcherait TensorFlow Lite
+    // de le mapper en mémoire directement et rallongerait le démarrage.
+    noCompress += "task"
+    noCompress += "tflite"
+  }
+  packaging {
+    resources {
+      excludes += setOf(
+        "META-INF/{AL2.0,LGPL2.1}",
+        "META-INF/DEPENDENCIES",
+        "META-INF/LICENSE*",
+        "META-INF/NOTICE*",
+        "**/*.kotlin_metadata"
+      )
+    }
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
@@ -73,8 +93,9 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
-// Some unused dependencies are commented out below instead of being removed.
-// This makes it easy to add them back in the future if needed.
+// Les dépendances inutilisées sont commentées plutôt que supprimées, pour pouvoir être
+// réactivées facilement. Room, Retrofit/Moshi/OkHttp et Coil n'étaient référencés nulle part
+// dans le code : les laisser actives alourdissait l'APK et le temps de build sans contrepartie.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
@@ -96,10 +117,10 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   // implementation(libs.androidx.navigation.compose)
-  implementation(libs.androidx.room.ktx)
-  implementation(libs.androidx.room.runtime)
-  implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
+  // implementation(libs.androidx.room.ktx)
+  // implementation(libs.androidx.room.runtime)
+  // implementation(libs.coil.compose)
+  // implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   implementation(libs.mediapipe.tasks.vision)
   // Uncomment to use Firestore:
@@ -114,11 +135,11 @@ dependencies {
   implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(libs.logging.interceptor)
-  implementation(libs.moshi.kotlin)
-  implementation(libs.okhttp)
+  // implementation(libs.logging.interceptor)
+  // implementation(libs.moshi.kotlin)
+  // implementation(libs.okhttp)
   // implementation(libs.play.services.location)
-  implementation(libs.retrofit)
+  // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -135,6 +156,6 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  "ksp"(libs.androidx.room.compiler)
-  "ksp"(libs.moshi.kotlin.codegen)
+  // "ksp"(libs.androidx.room.compiler)
+  // "ksp"(libs.moshi.kotlin.codegen)
 }

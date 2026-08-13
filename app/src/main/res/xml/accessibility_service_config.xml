@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Configuration minimale : le service n'a besoin d'exécuter que des actions globales
+  (Retour, Accueil, Récents). Il ne s'abonne à aucun type d'évènement et ne lit pas le contenu
+  des fenêtres, ce qui réduit d'autant la surface de données accessible et la charge système
+  par rapport à la configuration précédente (typeAllMask + canRetrieveWindowContent).
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
-    android:canRetrieveWindowContent="true"
-    android:description="@string/app_name"
-    android:notificationTimeout="100" />
+    android:canRetrieveWindowContent="false"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100"
+    android:summary="@string/accessibility_service_label" />

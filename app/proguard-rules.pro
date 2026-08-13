@@ -1,21 +1,46 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# Règles R8 du Stark HUD Launcher.
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# La minification est active en release. Les bibliothèques de vision par ordinateur reposent
+# massivement sur JNI et la réflexion : leurs symboles doivent être préservés, faute de quoi
+# l'application compile et s'installe mais échoue à charger le modèle à l'exécution.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# --- MediaPipe Tasks ---
+# Les classes de tâches et les protos générés sont résolus par nom depuis le code natif.
+-keep class com.google.mediapipe.** { *; }
+-keep interface com.google.mediapipe.** { *; }
+-keepclassmembers class com.google.mediapipe.** {
+    native <methods>;
+}
+-dontwarn com.google.mediapipe.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# --- TensorFlow Lite (moteur d'inférence sous MediaPipe) ---
+-keep class org.tensorflow.lite.** { *; }
+-keep class org.tensorflow.lite.gpu.** { *; }
+-dontwarn org.tensorflow.lite.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# --- Protocol Buffers et AutoValue ---
+# Les options des tâches MediaPipe sont des classes AutoValue instanciées par réflexion.
+-keep class com.google.protobuf.** { *; }
+-keep class * extends com.google.protobuf.GeneratedMessageLite { *; }
+-keepclassmembers class * extends com.google.auto.value.AutoValue { *; }
+-dontwarn com.google.protobuf.**
+-dontwarn com.google.auto.value.**
+-dontwarn javax.lang.model.**
+
+# --- CameraX ---
+-dontwarn androidx.camera.**
+
+# --- Service d'accessibilité ---
+# Instancié par le système à partir du nom déclaré dans le manifeste.
+-keep class com.example.service.StarkAccessibilityService { *; }
+
+# --- Modèle de données du moteur gestuel ---
+# Conservé pour que les traces de plantage restent lisibles sur le chemin critique.
+-keep class com.example.gesture.HandGestureState { *; }
+-keep class com.example.gesture.Landmark { *; }
+
+# --- Diagnostic ---
+# Conserve les numéros de ligne dans les traces tout en masquant les noms de fichiers source.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod

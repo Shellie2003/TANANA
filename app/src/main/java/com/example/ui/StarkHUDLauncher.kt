@@ -2,25 +2,19 @@ package com.example.ui
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.drawable.Drawable
 import android.os.BatteryManager
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.camera.view.PreviewView
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -50,10 +44,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -61,25 +54,26 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -94,8 +88,8 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -109,19 +103,23 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.drawable.toBitmap
 import com.example.gesture.GestureType
 import com.example.gesture.HandGestureState
+import com.example.gesture.HandLandmarks
 import com.example.ui.theme.StarkBlue
 import com.example.ui.theme.StarkCyan
 import com.example.ui.theme.StarkDarkBg
 import com.example.ui.theme.StarkGold
 import com.example.ui.theme.StarkRed
 import com.example.ui.theme.StarkSurface
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.sin
 
 data class LauncherAppItem(
@@ -131,193 +129,157 @@ data class LauncherAppItem(
     val fallbackIcon: ImageVector = Icons.Default.Android
 )
 
+/** Nombre maximal d'applications sur l'anneau principal. */
+private const val MAX_ORBIT_APPS = 12
+
+/** Rayon de capture du curseur autour d'une icône, en pixels indépendants de la densité. */
+private const val HOVER_RADIUS_DP = 78f
+
 /**
- * Interface Launcher Futuriste Stark HUD - Jetpack Compose
- * Inclut : Réacteur Arc Central, Anneau d'applications 3D, Curseur Holographique lissé,
- * Métriques Système en temps réel et Commandes Gestuelles.
+ * Interface du launcher Stark HUD.
+ *
+ * L'état gestuel est reçu sous forme de [State] et non de valeur : à 30 images par seconde,
+ * passer la valeur ferait recomposer l'intégralité de l'arbre à chaque frame. Ici, chaque
+ * consommateur lit l'état à la phase la plus tardive possible — dessin pour le curseur, mise
+ * en page pour l'anneau, `derivedStateOf` pour le survol — si bien qu'un déplacement de curseur
+ * ne déclenche plus aucune recomposition.
  */
 @Composable
 fun StarkHUDLauncher(
-    gestureState: HandGestureState,
-    onToggleCameraPreview: () -> Unit,
+    gestureState: State<HandGestureState>,
     onSimulatePosition: (x: Float, y: Float, isPinch: Boolean, isFist: Boolean) -> Unit,
+    onSimulationModeChanged: (Boolean) -> Unit,
     onBindPreview: ((PreviewView) -> Unit)? = null,
+    onReleasePreview: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val density = LocalDensity.current
 
-    // Applications installées
     val installedApps = remember { mutableStateListOf<LauncherAppItem>() }
-    var hoveredAppIndex by remember { mutableIntStateOf(-1) }
-
-    // Angle de rotation de l'anneau d'applications 3D
     var orbitRotationAngle by remember { mutableFloatStateOf(0f) }
+    var canvasWidthPx by remember { mutableFloatStateOf(1080f) }
+    var canvasHeightPx by remember { mutableFloatStateOf(2160f) }
 
-    // Position du curseur en pixels écran
-    var screenWidthPx by remember { mutableFloatStateOf(1080f) }
-    var screenHeightPx by remember { mutableFloatStateOf(2160f) }
-
-    // Heure système
     var currentTimeString by remember { mutableStateOf("") }
     var currentDateString by remember { mutableStateOf("") }
-
-    // Métriques Batterie et CPU
     var batteryLevel by remember { mutableIntStateOf(100) }
     var isBatteryCharging by remember { mutableStateOf(false) }
 
-    // Mode simulation
     var isSimModeActive by remember { mutableStateOf(false) }
     var showCameraPIP by remember { mutableStateOf(true) }
 
-    // Animations réacteur Arc
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val hoverRadiusPx = remember(density) { with(density) { HOVER_RADIUS_DP.dp.toPx() } }
+
     val infiniteTransition = rememberInfiniteTransition(label = "ArcReactorTransition")
     val reactorRotation by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(12000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        animationSpec = infiniteRepeatable(tween(12000, easing = LinearEasing), RepeatMode.Restart),
         label = "reactorRotation"
     )
-
     val corePulse by infiniteTransition.animateFloat(
         initialValue = 0.85f,
         targetValue = 1.15f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
+        animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing), RepeatMode.Reverse),
         label = "corePulse"
     )
 
-    // Déclenchement haptique lors des sélections
-    fun triggerVibration() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                vibratorManager.defaultVibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
-            } else {
-                @Suppress("DEPRECATION")
-                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                @Suppress("DEPRECATION")
-                vibrator.vibrate(40)
-            }
-        } catch (_: Exception) {}
+    val vibrate = rememberHapticFeedback()
+
+    /** Position d'une icône sur l'ellipse orbitale, pour un index donné. */
+    fun orbitPosition(index: Int, count: Int, angleDeg: Float): Pair<Float, Float> {
+        val angle = Math.toRadians((angleDeg + index * (360f / count)).toDouble())
+        return Pair(
+            canvasWidthPx / 2f + canvasWidthPx * 0.38f * cos(angle).toFloat(),
+            canvasHeightPx / 2f + canvasHeightPx * 0.22f * sin(angle).toFloat()
+        )
     }
 
-    // Charger la liste des applications installées
+    // Le survol ne change que lorsque le curseur franchit la frontière d'une icône : derivedStateOf
+    // absorbe les milliers de micro-déplacements intermédiaires.
+    val hoveredAppIndex by remember {
+        derivedStateOf {
+            val state = gestureState.value
+            val count = installedApps.size
+            if (count == 0 || !(state.isHandDetected || state.isSimulationMode)) return@derivedStateOf -1
+
+            val cursorX = state.cursorX * canvasWidthPx
+            val cursorY = state.cursorY * canvasHeightPx
+            var best = -1
+            var bestDistance = hoverRadiusPx
+            for (index in 0 until count) {
+                val (x, y) = orbitPosition(index, count, orbitRotationAngle)
+                val distance = hypot(cursorX - x, cursorY - y)
+                if (distance < bestDistance) {
+                    bestDistance = distance
+                    best = index
+                }
+            }
+            best
+        }
+    }
+
+    // --- Chargement des applications (hors thread principal) ---
     LaunchedEffect(Unit) {
-        launch {
-            val pm = context.packageManager
-            val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = withContext(Dispatchers.IO) { loadLauncherApps(context) }
+        installedApps.clear()
+        installedApps.addAll(apps)
+    }
+
+    // --- Horloge et batterie ---
+    LaunchedEffect(Unit) {
+        val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        val dateFormatter = SimpleDateFormat("EEE, dd MMM yyyy", Locale.getDefault())
+        val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+
+        while (true) {
+            val now = Date()
+            currentTimeString = timeFormatter.format(now)
+            currentDateString = dateFormatter.format(now)
+            batteryManager?.let {
+                batteryLevel = it.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                isBatteryCharging = it.isCharging
             }
-            val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
-            val appList = mutableListOf<LauncherAppItem>()
-
-            for (info in resolveInfos) {
-                val pkgName = info.activityInfo.packageName
-                if (pkgName == context.packageName) continue // ignorer le launcher lui-même dans la boucle
-
-                val appName = info.loadLabel(pm).toString()
-                val iconDrawable = try { info.loadIcon(pm) } catch (e: Exception) { null }
-                val bitmap = iconDrawable?.toBitmap(96, 96)
-
-                appList.add(LauncherAppItem(appName, pkgName, bitmap))
-            }
-
-            // Ajouter des raccourcis système de secours si la liste est restreinte
-            if (appList.isEmpty()) {
-                appList.addAll(
-                    listOf(
-                        LauncherAppItem("JARVIS Core", "com.android.settings", null, Icons.Default.Security),
-                        LauncherAppItem("Arc Diagnostics", "com.android.camera2", null, Icons.Default.Camera),
-                        LauncherAppItem("Stark Tech", "com.android.settings", null, Icons.Default.Memory),
-                        LauncherAppItem("System Config", "com.android.settings", null, Icons.Default.Settings)
-                    )
-                )
-            }
-
-            installedApps.clear()
-            installedApps.addAll(appList.take(12)) // Conserver max 12 apps dans l'anneau principal 3D
-        }
-
-        // Horloge et Batterie
-        launch {
-            val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-            val dateFormatter = SimpleDateFormat("EEE, dd MMM yyyy", Locale.getDefault())
-
-            while (true) {
-                val now = Date()
-                currentTimeString = timeFormatter.format(now)
-                currentDateString = dateFormatter.format(now)
-
-                val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-                if (bm != null) {
-                    batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-                    isBatteryCharging = bm.isCharging
-                }
-
-                delay(1000)
-            }
+            delay(1000)
         }
     }
 
-    // Réaction au Swipe Aérien
-    LaunchedEffect(gestureState.gesture) {
-        if (gestureState.gesture == GestureType.SWIPE_RIGHT) {
-            orbitRotationAngle += 30f
-            triggerVibration()
-        } else if (gestureState.gesture == GestureType.SWIPE_LEFT) {
-            orbitRotationAngle -= 30f
-            triggerVibration()
-        }
+    // --- Balayage aérien : rotation de l'anneau ---
+    // snapshotFlow observe l'état sans provoquer de recomposition de ce composable.
+    LaunchedEffect(Unit) {
+        snapshotFlow { gestureState.value.gesture }
+            .distinctUntilChanged()
+            .collect { gesture ->
+                when (gesture) {
+                    GestureType.SWIPE_RIGHT -> {
+                        orbitRotationAngle += 30f
+                        vibrate()
+                    }
+                    GestureType.SWIPE_LEFT -> {
+                        orbitRotationAngle -= 30f
+                        vibrate()
+                    }
+                    else -> Unit
+                }
+            }
     }
 
-    // Curseur calculé
-    val targetCursorX = gestureState.cursorX * screenWidthPx
-    val targetCursorY = gestureState.cursorY * screenHeightPx
-
-    // Détection de survol et Clic par Pinch
-    LaunchedEffect(targetCursorX, targetCursorY, gestureState.gesture) {
-        if (installedApps.isEmpty()) return@LaunchedEffect
-
-        val centerX = screenWidthPx / 2f
-        val centerY = screenHeightPx / 2f
-        val orbitRadiusX = screenWidthPx * 0.38f
-        val orbitRadiusY = screenHeightPx * 0.22f
-
-        var closestIndex = -1
-        var minDistance = 120.dp.value * density.density
-
-        installedApps.forEachIndexed { index, app ->
-            val angle = Math.toRadians((orbitRotationAngle + index * (360f / installedApps.size)).toDouble())
-            val appX = centerX + orbitRadiusX * cos(angle).toFloat()
-            val appY = centerY + orbitRadiusY * sin(angle).toFloat()
-
-            val dist = Math.hypot((targetCursorX - appX).toDouble(), (targetCursorY - appY).toDouble()).toFloat()
-            if (dist < minDistance) {
-                minDistance = dist
-                closestIndex = index
-            }
-        }
-
-        hoveredAppIndex = closestIndex
-
-        // Si geste Pinch détecté sur une app survolée -> Lancer l'application !
-        if (gestureState.gesture == GestureType.PINCH && hoveredAppIndex in installedApps.indices) {
-            val selectedApp = installedApps[hoveredAppIndex]
-            triggerVibration()
-            try {
-                val launchIntent = context.packageManager.getLaunchIntentForPackage(selectedApp.packageName)
-                if (launchIntent != null) {
-                    context.startActivity(launchIntent)
+    // --- Pincement : lancement de l'application survolée ---
+    // Déclenché par le front montant publié par l'analyseur (`pinchClickTick`), et non par l'état
+    // « en train de pincer » : auparavant, maintenir le pincement relançait l'application à chaque
+    // déplacement du curseur.
+    LaunchedEffect(Unit) {
+        snapshotFlow { gestureState.value.pinchClickTick }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect {
+                val index = hoveredAppIndex
+                if (index in installedApps.indices) {
+                    vibrate()
+                    launchApp(context, installedApps[index].packageName)
                 }
-            } catch (_: Exception) {}
-        }
+            }
     }
 
     Box(
@@ -325,146 +287,101 @@ fun StarkHUDLauncher(
             .fillMaxSize()
             .background(StarkDarkBg)
             .testTag("stark_hud_container")
-            .pointerInput(Unit) {
+            .onSizeChanged {
+                canvasWidthPx = it.width.toFloat()
+                canvasHeightPx = it.height.toFloat()
+            }
+            .pointerInput(isSimModeActive) {
                 detectDragGestures { change, dragAmount ->
                     if (isSimModeActive) {
                         change.consume()
-                        val newX = (change.position.x / size.width).coerceIn(0f, 1f)
-                        val newY = (change.position.y / size.height).coerceIn(0f, 1f)
-                        onSimulatePosition(newX, newY, false, false)
+                        onSimulatePosition(
+                            (change.position.x / size.width).coerceIn(0f, 1f),
+                            (change.position.y / size.height).coerceIn(0f, 1f),
+                            false,
+                            false
+                        )
                     } else {
                         orbitRotationAngle += dragAmount.x * 0.2f
                     }
                 }
             }
     ) {
-        // Enregistrer la taille de l'écran en Canvas
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            screenWidthPx = size.width
-            screenHeightPx = size.height
+        CyberBackdrop()
 
-            // 1. Grille cybernétique et cercles de fond Stark
-            val gridSpacing = 80.dp.toPx()
-            val gridPath = Path()
-
-            var x = 0f
-            while (x < size.width) {
-                gridPath.moveTo(x, 0f)
-                gridPath.lineTo(x, size.height)
-                x += gridSpacing
-            }
-            var y = 0f
-            while (y < size.height) {
-                gridPath.moveTo(0f, y)
-                gridPath.lineTo(size.width, y)
-                y += gridSpacing
-            }
-
-            drawPath(
-                path = gridPath,
-                color = StarkCyan.copy(alpha = 0.05f),
-                style = Stroke(width = 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f)))
-            )
-
-            // Cercles concentriques d'arrière-plan
-            val center = Offset(size.width / 2f, size.height / 2f)
-            drawCircle(color = StarkCyan.copy(alpha = 0.08f), radius = size.width * 0.42f, center = center, style = Stroke(width = 1.5f))
-            drawCircle(color = StarkCyan.copy(alpha = 0.12f), radius = size.width * 0.25f, center = center, style = Stroke(width = 1f))
-        }
-
-        // 2. Réacteur Arc Central Animé (Arc Reactor HUD)
         ArcReactorCenter(
             modifier = Modifier.align(Alignment.Center),
             rotationAngle = reactorRotation,
             pulseScale = corePulse,
-            isPinching = gestureState.gesture == GestureType.PINCH,
-            isFist = gestureState.gesture == GestureType.FIST
+            gestureState = gestureState
         )
 
-        // 3. Anneau d'Applications 3D Orbit
-        val centerX = screenWidthPx / 2f
-        val centerY = screenHeightPx / 2f
-        val orbitRadiusX = screenWidthPx * 0.38f
-        val orbitRadiusY = screenHeightPx * 0.22f
-
         installedApps.forEachIndexed { index, app ->
-            val angleDeg = orbitRotationAngle + index * (360f / installedApps.size)
-            val angleRad = Math.toRadians(angleDeg.toDouble())
-
-            val appX = centerX + orbitRadiusX * cos(angleRad).toFloat()
-            val appY = centerY + orbitRadiusY * sin(angleRad).toFloat()
-
-            val zDepthScale = 0.7f + 0.35f * sin(angleRad).toFloat()
-            val appAlpha = 0.4f + 0.6f * sin(angleRad).toFloat()
-
-            val isHovered = (index == hoveredAppIndex)
-
+            val count = installedApps.size
             Box(
                 modifier = Modifier
-                    .offset { IntOffset((appX - 40.dp.toPx()).toInt(), (appY - 40.dp.toPx()).toInt()) }
+                    // Lu en phase de mise en page : faire tourner l'anneau ne recompose rien.
+                    .offset {
+                        val (x, y) = orbitPosition(index, count, orbitRotationAngle)
+                        IntOffset((x - 40.dp.toPx()).toInt(), (y - 40.dp.toPx()).toInt())
+                    }
                     .graphicsLayer {
-                        scaleX = if (isHovered) zDepthScale * 1.3f else zDepthScale
-                        scaleY = if (isHovered) zDepthScale * 1.3f else zDepthScale
-                        alpha = appAlpha
+                        val angle = Math.toRadians(
+                            (orbitRotationAngle + index * (360f / count)).toDouble()
+                        )
+                        val depth = 0.7f + 0.35f * sin(angle).toFloat()
+                        val hovered = index == hoveredAppIndex
+                        scaleX = if (hovered) depth * 1.3f else depth
+                        scaleY = if (hovered) depth * 1.3f else depth
+                        alpha = (0.4f + 0.6f * sin(angle).toFloat()).coerceIn(0.15f, 1f)
                     }
-                    .clickable {
-                        try {
-                            val launchIntent = context.packageManager.getLaunchIntentForPackage(app.packageName)
-                            if (launchIntent != null) context.startActivity(launchIntent)
-                        } catch (_: Exception) {}
-                    }
+                    .clickable { launchApp(context, app.packageName) }
             ) {
-                AppOrbitalNode(
-                    app = app,
-                    isHovered = isHovered
-                )
+                AppOrbitalNode(app = app, isHovered = index == hoveredAppIndex)
             }
         }
 
-        // 4. En-tête HUD Supérieur (Système Stark / JARVIS & Stats)
         StarkHeaderHUD(
             timeString = currentTimeString,
             dateString = currentDateString,
             batteryLevel = batteryLevel,
             isCharging = isBatteryCharging,
-            fps = gestureState.fps,
+            gestureState = gestureState,
             modifier = Modifier.align(Alignment.TopCenter)
         )
 
-        // 5. Barre d'état Gestuelle Inférieure (Gestures HUD)
         StarkFooterGestureHUD(
             gestureState = gestureState,
             isSimMode = isSimModeActive,
             onToggleSimMode = {
                 isSimModeActive = !isSimModeActive
+                onSimulationModeChanged(isSimModeActive)
             },
             onSimulateGesture = { gesture ->
+                val state = gestureState.value
                 when (gesture) {
-                    GestureType.PINCH -> onSimulatePosition(gestureState.cursorX, gestureState.cursorY, true, false)
-                    GestureType.FIST -> onSimulatePosition(gestureState.cursorX, gestureState.cursorY, false, true)
+                    GestureType.PINCH -> onSimulatePosition(state.cursorX, state.cursorY, true, false)
+                    GestureType.FIST -> onSimulatePosition(state.cursorX, state.cursorY, false, true)
                     GestureType.SWIPE_RIGHT -> orbitRotationAngle += 35f
                     GestureType.SWIPE_LEFT -> orbitRotationAngle -= 35f
-                    else -> onSimulatePosition(gestureState.cursorX, gestureState.cursorY, false, false)
+                    else -> onSimulatePosition(state.cursorX, state.cursorY, false, false)
                 }
             },
             onToggleCameraPIP = { showCameraPIP = !showCameraPIP },
             modifier = Modifier.align(Alignment.BottomCenter)
         )
 
-        // 5.5. Caméra PIP de Détection et Suivi de Main (Hand Tracking Frame)
         if (showCameraPIP) {
             HandTrackingCameraPIP(
                 gestureState = gestureState,
                 onBindPreview = onBindPreview,
+                onReleasePreview = onReleasePreview,
                 onClosePIP = { showCameraPIP = false },
                 modifier = Modifier.align(Alignment.TopEnd)
             )
         }
 
-        // 6. Curseur Cible Holographique
         HolographicCursorOverlay(
-            cursorX = targetCursorX,
-            cursorY = targetCursorY,
             gestureState = gestureState,
             isHovering = hoveredAppIndex != -1
         )
@@ -472,19 +389,55 @@ fun StarkHUDLauncher(
 }
 
 /**
- * Réacteur Arc Central Dessiné sur Canvas Compose avec Effets Néon & Stark Core
+ * Grille cybernétique et cercles de fond.
+ *
+ * `drawWithCache` construit le tracé une seule fois par taille : la version précédente
+ * reconstruisait plusieurs dizaines de segments de `Path` à chaque image.
  */
+@Composable
+private fun CyberBackdrop(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .drawWithCache {
+                val gridSpacing = 80.dp.toPx()
+                val gridPath = Path().apply {
+                    var x = 0f
+                    while (x < size.width) {
+                        moveTo(x, 0f); lineTo(x, size.height); x += gridSpacing
+                    }
+                    var y = 0f
+                    while (y < size.height) {
+                        moveTo(0f, y); lineTo(size.width, y); y += gridSpacing
+                    }
+                }
+                val gridStroke = Stroke(
+                    width = 1f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f))
+                )
+                val center = Offset(size.width / 2f, size.height / 2f)
+
+                onDrawBehind {
+                    drawPath(gridPath, StarkCyan.copy(alpha = 0.05f), style = gridStroke)
+                    drawCircle(StarkCyan.copy(alpha = 0.08f), size.width * 0.42f, center, style = Stroke(1.5f))
+                    drawCircle(StarkCyan.copy(alpha = 0.12f), size.width * 0.25f, center, style = Stroke(1f))
+                }
+            }
+    )
+}
+
+/** Réacteur Arc central. */
 @Composable
 fun ArcReactorCenter(
     rotationAngle: Float,
     pulseScale: Float,
-    isPinching: Boolean,
-    isFist: Boolean,
+    gestureState: State<HandGestureState>,
     modifier: Modifier = Modifier
 ) {
-    val coreColor = when {
-        isPinching -> StarkGold
-        isFist -> StarkRed
+    val gesture by remember { derivedStateOf { gestureState.value.gesture } }
+    val coreColor = when (gesture) {
+        GestureType.PINCH -> StarkGold
+        GestureType.FIST -> StarkRed
         else -> StarkCyan
     }
 
@@ -501,23 +454,19 @@ fun ArcReactorCenter(
             val center = Offset(size.width / 2f, size.height / 2f)
             val maxRadius = size.width / 2f
 
-            // Anneau Extérieur
             drawCircle(
                 color = coreColor.copy(alpha = 0.3f),
                 radius = maxRadius * 0.9f,
                 style = Stroke(width = 3.dp.toPx())
             )
 
-            // Segments tournants
             rotate(rotationAngle, center) {
                 val segmentCount = 10
-                val sweepAngle = 20f
                 for (i in 0 until segmentCount) {
-                    val startAngle = i * (360f / segmentCount)
                     drawArc(
                         color = coreColor,
-                        startAngle = startAngle,
-                        sweepAngle = sweepAngle,
+                        startAngle = i * (360f / segmentCount),
+                        sweepAngle = 20f,
                         useCenter = false,
                         topLeft = Offset(center.x - maxRadius * 0.85f, center.y - maxRadius * 0.85f),
                         size = Size(maxRadius * 1.7f, maxRadius * 1.7f),
@@ -526,14 +475,12 @@ fun ArcReactorCenter(
                 }
             }
 
-            // Anneau Interne
             rotate(-rotationAngle * 1.5f, center) {
                 val segmentCount = 6
                 for (i in 0 until segmentCount) {
-                    val startAngle = i * (360f / segmentCount)
                     drawArc(
                         color = StarkBlue.copy(alpha = 0.8f),
-                        startAngle = startAngle,
+                        startAngle = i * (360f / segmentCount),
                         sweepAngle = 35f,
                         useCenter = false,
                         topLeft = Offset(center.x - maxRadius * 0.6f, center.y - maxRadius * 0.6f),
@@ -543,7 +490,6 @@ fun ArcReactorCenter(
                 }
             }
 
-            // Cœur Lumineux
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(coreColor, coreColor.copy(alpha = 0.4f), Color.Transparent),
@@ -552,16 +498,10 @@ fun ArcReactorCenter(
                 ),
                 radius = maxRadius * 0.45f
             )
-
-            drawCircle(
-                color = Color.White,
-                radius = maxRadius * 0.18f
-            )
+            drawCircle(color = Color.White, radius = maxRadius * 0.18f)
         }
 
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 text = "ARC REACTOR",
                 color = StarkCyan,
@@ -570,7 +510,11 @@ fun ArcReactorCenter(
                 fontFamily = FontFamily.Monospace
             )
             Text(
-                text = if (isPinching) "ENGAGED" else if (isFist) "OVERRIDE" else "100%",
+                text = when (gesture) {
+                    GestureType.PINCH -> "ENGAGED"
+                    GestureType.FIST -> "OVERRIDE"
+                    else -> "100%"
+                },
                 color = coreColor,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.ExtraBold,
@@ -580,14 +524,8 @@ fun ArcReactorCenter(
     }
 }
 
-/**
- * Composant Noeud d'Application Orbitale
- */
 @Composable
-fun AppOrbitalNode(
-    app: LauncherAppItem,
-    isHovered: Boolean
-) {
+fun AppOrbitalNode(app: LauncherAppItem, isHovered: Boolean) {
     val borderColor = if (isHovered) StarkGold else StarkCyan
     val glowBg = if (isHovered) StarkGold.copy(alpha = 0.25f) else StarkCyan.copy(alpha = 0.1f)
 
@@ -604,9 +542,10 @@ fun AppOrbitalNode(
                 .padding(8.dp),
             contentAlignment = Alignment.Center
         ) {
-            if (app.iconBitmap != null) {
+            val icon = app.iconBitmap
+            if (icon != null) {
                 Image(
-                    bitmap = app.iconBitmap.asImageBitmap(),
+                    bitmap = icon.asImageBitmap(),
                     contentDescription = app.label,
                     modifier = Modifier.fillMaxSize()
                 )
@@ -635,16 +574,14 @@ fun AppOrbitalNode(
     }
 }
 
-/**
- * En-tête HUD Supérieur (Système Stark / JARVIS & Metrics)
- */
+/** En-tête HUD : horloge, batterie et télémétrie du moteur de suivi. */
 @Composable
 fun StarkHeaderHUD(
     timeString: String,
     dateString: String,
     batteryLevel: Int,
     isCharging: Boolean,
-    fps: Int,
+    gestureState: State<HandGestureState>,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -654,7 +591,6 @@ fun StarkHeaderHUD(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Horloge & System Info Left
         Column {
             Text(
                 text = "JARVIS OS // v4.2",
@@ -678,93 +614,128 @@ fun StarkHeaderHUD(
             )
         }
 
-        // Stats Right (Battery & FPS)
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = StarkSurface),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.border(1.dp, StarkCyan.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.BatteryFull,
-                        contentDescription = "Battery",
-                        tint = if (batteryLevel > 20) StarkCyan else StarkRed,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "$batteryLevel%" + if (isCharging) " ⚡" else "",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = StarkSurface),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.border(1.dp, StarkCyan.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Memory,
-                        contentDescription = "FPS",
-                        tint = StarkGold,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "$fps FPS",
-                        color = StarkGold,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
+            HudChip(
+                icon = Icons.Default.BatteryFull,
+                tint = if (batteryLevel > 20) StarkCyan else StarkRed,
+                text = "$batteryLevel%" + if (isCharging) " ⚡" else "",
+                textColor = Color.White
+            )
+            TrackingTelemetryChip(gestureState)
         }
     }
 }
 
 /**
- * Barre de contrôle gestuel et statut HUD inférieur
+ * Télémétrie du moteur de suivi : cadence, latence d'inférence et confiance.
+ * Isolée dans son propre composable et alimentée par `derivedStateOf`, elle se rafraîchit
+ * sans entraîner le reste de l'en-tête.
  */
 @Composable
+private fun TrackingTelemetryChip(gestureState: State<HandGestureState>) {
+    val telemetry by remember {
+        derivedStateOf {
+            val s = gestureState.value
+            Triple(s.fps, s.latencyMs, (s.confidence * 100).toInt())
+        }
+    }
+    val (fps, latency, confidence) = telemetry
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = StarkSurface),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.border(1.dp, StarkCyan.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Speed,
+                contentDescription = "Télémétrie du suivi",
+                tint = StarkGold,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Column {
+                Text(
+                    text = "$fps FPS · ${latency}ms",
+                    color = StarkGold,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "PRÉCISION $confidence%",
+                    color = if (confidence >= 70) StarkCyan else StarkCyan.copy(alpha = 0.5f),
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HudChip(icon: ImageVector, tint: Color, text: String, textColor: Color) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = StarkSurface),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.border(1.dp, StarkCyan.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = text,
+                color = textColor,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+/** Barre inférieure : geste courant et contrôles rapides. */
+@Composable
 fun StarkFooterGestureHUD(
-    gestureState: HandGestureState,
+    gestureState: State<HandGestureState>,
     isSimMode: Boolean,
     onToggleSimMode: () -> Unit,
     onSimulateGesture: (GestureType) -> Unit,
     onToggleCameraPIP: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val status by remember {
+        derivedStateOf {
+            val s = gestureState.value
+            if (s.isVisionUnavailable) null else s.gesture
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(bottom = 24.dp, start = 12.dp, end = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Badge du Geste courant
-        val gestureLabel = when (gestureState.gesture) {
-            GestureType.PINCH -> "PINCH -> [CLIC / SELECTION]"
-            GestureType.FIST -> "FIST -> [RETOUR / ACCUEIL]"
-            GestureType.SWIPE_RIGHT -> "SWIPE DROITE -> [DEFILEMENT ORBITE]"
-            GestureType.SWIPE_LEFT -> "SWIPE GAUCHE -> [DEFILEMENT ORBITE]"
+        val label = when (status) {
+            null -> "MODULE DE VISION INDISPONIBLE"
+            GestureType.PINCH -> "PINCE -> [CLIC / SÉLECTION]"
+            GestureType.FIST -> "POING -> [RETOUR SYSTÈME]"
+            GestureType.POINT -> "INDEX -> [VISÉE DE PRÉCISION]"
+            GestureType.SWIPE_RIGHT -> "BALAYAGE DROITE -> [ROTATION ORBITE]"
+            GestureType.SWIPE_LEFT -> "BALAYAGE GAUCHE -> [ROTATION ORBITE]"
             GestureType.OPEN_PALM -> "MAIN OUVERTE -> [CURSEUR HOLOGRAPHIQUE]"
             GestureType.IDLE -> "EN ATTENTE DE MAIN..."
         }
-
-        val badgeColor = when (gestureState.gesture) {
+        val badgeColor = when (status) {
+            null -> StarkRed
             GestureType.PINCH -> StarkGold
             GestureType.FIST -> StarkRed
             GestureType.SWIPE_RIGHT, GestureType.SWIPE_LEFT -> StarkBlue
@@ -778,7 +749,7 @@ fun StarkFooterGestureHUD(
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
             Text(
-                text = gestureLabel,
+                text = label,
                 color = badgeColor,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
@@ -788,7 +759,6 @@ fun StarkFooterGestureHUD(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Actions de Simulation et Contrôle Rapide
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -796,7 +766,7 @@ fun StarkFooterGestureHUD(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "MODE TOUCH / SIM:",
+                    text = "MODE TACTILE / SIM:",
                     color = StarkCyan,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace
@@ -821,22 +791,18 @@ fun StarkFooterGestureHUD(
                         onClick = { onSimulateGesture(GestureType.PINCH) },
                         colors = ButtonDefaults.buttonColors(containerColor = StarkGold),
                         modifier = Modifier.height(32.dp)
-                    ) {
-                        Text("PINCH", fontSize = 10.sp, color = Color.Black)
-                    }
+                    ) { Text("PINCE", fontSize = 10.sp, color = Color.Black) }
                     Button(
                         onClick = { onSimulateGesture(GestureType.SWIPE_RIGHT) },
                         colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
                         modifier = Modifier.height(32.dp)
-                    ) {
-                        Text("ROTATE", fontSize = 10.sp, color = Color.Black)
-                    }
+                    ) { Text("ROTATION", fontSize = 10.sp, color = Color.Black) }
                 }
             } else {
                 IconButton(onClick = onToggleCameraPIP) {
                     Icon(
                         imageVector = Icons.Default.Videocam,
-                        contentDescription = "Camera PIP",
+                        contentDescription = "Aperçu caméra",
                         tint = StarkCyan
                     )
                 }
@@ -846,37 +812,36 @@ fun StarkFooterGestureHUD(
 }
 
 /**
- * Curseur Cible Holographique
+ * Curseur holographique.
+ *
+ * Toute la lecture de l'état se fait dans la lambda de dessin : le curseur suit la main à la
+ * cadence de la caméra sans jamais déclencher de recomposition ni de nouvelle mise en page.
  */
 @Composable
 fun HolographicCursorOverlay(
-    cursorX: Float,
-    cursorY: Float,
-    gestureState: HandGestureState,
+    gestureState: State<HandGestureState>,
     isHovering: Boolean
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "CursorTransition")
     val cursorRotation by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        animationSpec = infiniteRepeatable(tween(4000, easing = LinearEasing), RepeatMode.Restart),
         label = "cursorRotation"
     )
 
-    val cursorColor = when (gestureState.gesture) {
-        GestureType.PINCH -> StarkGold
-        GestureType.FIST -> StarkRed
-        else -> if (isHovering) StarkGold else StarkCyan
-    }
-
     Canvas(modifier = Modifier.fillMaxSize()) {
-        val center = Offset(cursorX, cursorY)
-        val radius = if (gestureState.gesture == GestureType.PINCH) 24.dp.toPx() else 36.dp.toPx()
+        val state = gestureState.value
+        if (!state.isHandDetected && !state.isSimulationMode) return@Canvas
 
-        // Cercle pointillé externe
+        val center = Offset(state.cursorX * size.width, state.cursorY * size.height)
+        val cursorColor = when (state.gesture) {
+            GestureType.PINCH -> StarkGold
+            GestureType.FIST -> StarkRed
+            else -> if (isHovering) StarkGold else StarkCyan
+        }
+        val radius = if (state.gesture == GestureType.PINCH) 24.dp.toPx() else 36.dp.toPx()
+
         rotate(cursorRotation, center) {
             drawCircle(
                 color = cursorColor,
@@ -889,65 +854,72 @@ fun HolographicCursorOverlay(
             )
         }
 
-        // Réticule interne
         val lineLength = 12.dp.toPx()
-        drawLine(cursorColor, Offset(center.x - lineLength - radius * 0.4f, center.y), Offset(center.x - radius * 0.4f, center.y), strokeWidth = 2.dp.toPx())
-        drawLine(cursorColor, Offset(center.x + radius * 0.4f, center.y), Offset(center.x + lineLength + radius * 0.4f, center.y), strokeWidth = 2.dp.toPx())
-        drawLine(cursorColor, Offset(center.x, center.y - lineLength - radius * 0.4f), Offset(center.x, center.y - radius * 0.4f), strokeWidth = 2.dp.toPx())
-        drawLine(cursorColor, Offset(center.x, center.y + radius * 0.4f), Offset(center.x, center.y + lineLength + radius * 0.4f), strokeWidth = 2.dp.toPx())
+        val stroke = 2.dp.toPx()
+        val gap = radius * 0.4f
+        drawLine(cursorColor, Offset(center.x - lineLength - gap, center.y), Offset(center.x - gap, center.y), stroke)
+        drawLine(cursorColor, Offset(center.x + gap, center.y), Offset(center.x + lineLength + gap, center.y), stroke)
+        drawLine(cursorColor, Offset(center.x, center.y - lineLength - gap), Offset(center.x, center.y - gap), stroke)
+        drawLine(cursorColor, Offset(center.x, center.y + gap), Offset(center.x, center.y + lineLength + gap), stroke)
 
-        // Point central
-        drawCircle(
-            color = cursorColor,
-            radius = 4.dp.toPx(),
-            center = center
-        )
+        drawCircle(color = cursorColor, radius = 4.dp.toPx(), center = center)
 
-        // Indication des coordonnées Z
-        if (gestureState.isHandDetected) {
+        // Anneau de force du pincement : retour visuel analogique avant même le déclenchement,
+        // l'utilisateur voit le clic approcher au lieu de le subir.
+        if (state.pinchStrength > 0.05f) {
             drawCircle(
-                color = cursorColor.copy(alpha = 0.2f),
-                radius = radius * (1.0f + gestureState.cursorZ * 0.5f),
+                color = StarkGold.copy(alpha = 0.25f + 0.55f * state.pinchStrength),
+                radius = radius * (1.35f - 0.35f * state.pinchStrength),
                 center = center,
-                style = Stroke(width = 1.dp.toPx())
+                style = Stroke(width = 3.dp.toPx())
             )
         }
+
+        // Halo de profondeur.
+        drawCircle(
+            color = cursorColor.copy(alpha = 0.2f),
+            radius = radius * (1f + state.cursorZ * 0.5f),
+            center = center,
+            style = Stroke(width = 1.dp.toPx())
+        )
     }
 }
 
 /**
- * Fenêtre PIP Caméra Futuriste Stark Tech
- * Affiche le flux vidéo en direct de la caméra frontale et dessine le squelette
- * complet de la main (21 points de repère, os, boîte englobante et statut de détection).
+ * Fenêtre d'aperçu caméra avec superposition du squelette de la main.
  */
 @Composable
 fun HandTrackingCameraPIP(
-    gestureState: HandGestureState,
+    gestureState: State<HandGestureState>,
     onBindPreview: ((PreviewView) -> Unit)?,
+    onReleasePreview: () -> Unit,
     onClosePIP: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
 
-    val pipWidth = if (isExpanded) 220.dp else 160.dp
-    val pipHeight = if (isExpanded) 280.dp else 200.dp
+    val isDetected by remember { derivedStateOf { gestureState.value.isHandDetected } }
+    val gesture by remember { derivedStateOf { gestureState.value.gesture } }
+
+    // La surface d'aperçu est relâchée quand la fenêtre disparaît, pour que la caméra puisse
+    // être relié sans cas d'usage d'aperçu orphelin.
+    DisposableEffect(Unit) { onDispose { onReleasePreview() } }
 
     Card(
         modifier = modifier
             .padding(top = 70.dp, end = 16.dp)
-            .size(width = pipWidth, height = pipHeight)
+            .size(
+                width = if (isExpanded) 220.dp else 160.dp,
+                height = if (isExpanded) 280.dp else 200.dp
+            )
             .border(
-                border = BorderStroke(
-                    1.5.dp,
-                    if (gestureState.isHandDetected) StarkCyan else StarkGold.copy(alpha = 0.6f)
-                ),
+                border = BorderStroke(1.5.dp, if (isDetected) StarkCyan else StarkGold.copy(alpha = 0.6f)),
                 shape = RoundedCornerShape(12.dp)
             ),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = StarkDarkBg.copy(alpha = 0.88f))
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            // 1. Aperçu de la Caméra en Direct via CameraX
             AndroidView(
                 factory = { ctx ->
                     PreviewView(ctx).apply {
@@ -958,7 +930,6 @@ fun HandTrackingCameraPIP(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // 2. Calque Gradient Cyber
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -973,129 +944,8 @@ fun HandTrackingCameraPIP(
                     )
             )
 
-            // 3. Squelette de la Main & Bounding Box dessinés sur Canvas
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val canvasW = size.width
-                val canvasH = size.height
+            HandSkeletonOverlay(gestureState)
 
-                // Bords d'angle HUD Futuristes
-                val cornerLen = 14f
-                val strokeW = 2.5f
-                val frameColor = if (gestureState.isHandDetected) StarkCyan else StarkGold
-
-                drawLine(frameColor, Offset(8f, 8f), Offset(8f + cornerLen, 8f), strokeWidth = strokeW)
-                drawLine(frameColor, Offset(8f, 8f), Offset(8f, 8f + cornerLen), strokeWidth = strokeW)
-
-                drawLine(frameColor, Offset(canvasW - 8f, 8f), Offset(canvasW - 8f - cornerLen, 8f), strokeWidth = strokeW)
-                drawLine(frameColor, Offset(canvasW - 8f, 8f), Offset(canvasW - 8f, 8f + cornerLen), strokeWidth = strokeW)
-
-                drawLine(frameColor, Offset(8f, canvasH - 8f), Offset(8f + cornerLen, canvasH - 8f), strokeWidth = strokeW)
-                drawLine(frameColor, Offset(8f, canvasH - 8f), Offset(8f, canvasH - 8f - cornerLen), strokeWidth = strokeW)
-
-                drawLine(frameColor, Offset(canvasW - 8f, canvasH - 8f), Offset(canvasW - 8f - cornerLen, canvasH - 8f), strokeWidth = strokeW)
-                drawLine(frameColor, Offset(canvasW - 8f, canvasH - 8f), Offset(canvasW - 8f, canvasH - 8f - cornerLen), strokeWidth = strokeW)
-
-                // Dessin du Squelette si la main est détectée
-                val landmarks = gestureState.landmarks
-                if (landmarks.isNotEmpty() && gestureState.isHandDetected) {
-                    val pts = landmarks.map { pt ->
-                        Offset(pt.x * canvasW, pt.y * canvasH)
-                    }
-
-                    fun drawBone(i1: Int, i2: Int, color: Color = StarkCyan) {
-                        if (i1 < pts.size && i2 < pts.size) {
-                            drawLine(
-                                color = color,
-                                start = pts[i1],
-                                end = pts[i2],
-                                strokeWidth = 2.5f
-                            )
-                        }
-                    }
-
-                    if (pts.size >= 21) {
-                        // Connexions de la paume / poignet
-                        drawBone(0, 1)
-                        drawBone(0, 5)
-                        drawBone(0, 9)
-                        drawBone(0, 13)
-                        drawBone(0, 17)
-
-                        // Pouce: 1 -> 2 -> 3 -> 4
-                        drawBone(1, 2)
-                        drawBone(2, 3)
-                        drawBone(3, 4, color = StarkGold)
-
-                        // Index: 5 -> 6 -> 7 -> 8
-                        drawBone(5, 6)
-                        drawBone(6, 7)
-                        drawBone(7, 8, color = StarkCyan)
-
-                        // Majeur: 9 -> 10 -> 11 -> 12
-                        drawBone(9, 10)
-                        drawBone(10, 11)
-                        drawBone(11, 12)
-
-                        // Annulaire: 13 -> 14 -> 15 -> 16
-                        drawBone(13, 14)
-                        drawBone(14, 15)
-                        drawBone(15, 16)
-
-                        // Auriculaire: 17 -> 18 -> 19 -> 20
-                        drawBone(17, 18)
-                        drawBone(18, 19)
-                        drawBone(19, 20)
-
-                        // Boîte englobante de la main (Bounding Box)
-                        var minX = canvasW
-                        var maxX = 0f
-                        var minY = canvasH
-                        var maxY = 0f
-
-                        pts.forEach { pt ->
-                            if (pt.x < minX) minX = pt.x
-                            if (pt.x > maxX) maxX = pt.x
-                            if (pt.y < minY) minY = pt.y
-                            if (pt.y > maxY) maxY = pt.y
-                        }
-
-                        minX = (minX - 10f).coerceAtLeast(4f)
-                        maxX = (maxX + 10f).coerceAtMost(canvasW - 4f)
-                        minY = (minY - 10f).coerceAtLeast(4f)
-                        maxY = (maxY + 10f).coerceAtMost(canvasH - 4f)
-
-                        drawRect(
-                            color = StarkCyan.copy(alpha = 0.5f),
-                            topLeft = Offset(minX, minY),
-                            size = Size(maxX - minX, maxY - minY),
-                            style = Stroke(width = 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
-                        )
-                    }
-
-                    // Dessin des articulations (Landmarks)
-                    pts.forEachIndexed { index, pt ->
-                        val jointColor = when (index) {
-                            4 -> StarkGold
-                            8 -> if (gestureState.gesture == GestureType.PINCH) StarkGold else StarkCyan
-                            0 -> StarkRed
-                            else -> StarkCyan.copy(alpha = 0.85f)
-                        }
-                        val radius = if (index == 8 || index == 4) 5.5f else 3.5f
-                        drawCircle(jointColor, radius = radius, center = pt)
-                    }
-                } else if (!gestureState.isHandDetected) {
-                    // Ligne de balayage radar quand la main est en cours de recherche
-                    val scanY = (System.currentTimeMillis() % 2000) / 2000f * canvasH
-                    drawLine(
-                        color = StarkGold.copy(alpha = 0.6f),
-                        start = Offset(0f, scanY),
-                        end = Offset(canvasW, scanY),
-                        strokeWidth = 1.5f
-                    )
-                }
-            }
-
-            // 4. En-tête HUD avec statut
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1108,42 +958,33 @@ fun HandTrackingCameraPIP(
                     Box(
                         modifier = Modifier
                             .size(7.dp)
-                            .background(
-                                color = if (gestureState.isHandDetected) StarkCyan else StarkGold,
-                                shape = CircleShape
-                            )
+                            .background(if (isDetected) StarkCyan else StarkGold, CircleShape)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = if (gestureState.isHandDetected) "HAND DETECTED" else "SEARCHING...",
+                        text = if (isDetected) "MAIN DÉTECTÉE" else "RECHERCHE...",
                         style = TextStyle(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (gestureState.isHandDetected) StarkCyan else StarkGold
+                            color = if (isDetected) StarkCyan else StarkGold
                         )
                     )
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { isExpanded = !isExpanded },
-                        modifier = Modifier.size(18.dp)
-                    ) {
+                    IconButton(onClick = { isExpanded = !isExpanded }, modifier = Modifier.size(18.dp)) {
                         Icon(
                             imageVector = if (isExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = "Resize PIP",
+                            contentDescription = "Redimensionner",
                             tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(12.dp)
                         )
                     }
-                    IconButton(
-                        onClick = onClosePIP,
-                        modifier = Modifier.size(18.dp)
-                    ) {
+                    IconButton(onClick = onClosePIP, modifier = Modifier.size(18.dp)) {
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "Close PIP",
+                            contentDescription = "Fermer l'aperçu",
                             tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(12.dp)
                         )
@@ -1151,33 +992,185 @@ fun HandTrackingCameraPIP(
                 }
             }
 
-            // 5. Badge inférieur affichant le geste actif
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 6.dp)
-                    .background(
-                        color = StarkDarkBg.copy(alpha = 0.9f),
-                        shape = RoundedCornerShape(4.dp)
-                    )
+                    .background(StarkDarkBg.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
                     .border(0.5.dp, StarkCyan.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
                 Text(
-                    text = "GESTURE: ${gestureState.gesture.name}",
+                    text = "GESTE: ${gesture.name}",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 7.5.sp,
                         fontWeight = FontWeight.Bold,
-                        color = when (gestureState.gesture) {
+                        color = when (gesture) {
                             GestureType.PINCH -> StarkGold
                             GestureType.FIST -> StarkRed
-                            GestureType.OPEN_PALM -> StarkCyan
+                            GestureType.OPEN_PALM, GestureType.POINT -> StarkCyan
                             else -> Color.White.copy(alpha = 0.7f)
                         }
                     )
                 )
             }
         }
+    }
+}
+
+/** Connexions osseuses du squelette de la main, précalculées une fois pour toutes. */
+private val HAND_BONES: List<Pair<Int, Int>> = listOf(
+    0 to 1, 0 to 5, 0 to 9, 0 to 13, 0 to 17,
+    1 to 2, 2 to 3, 3 to 4,
+    5 to 6, 6 to 7, 7 to 8,
+    9 to 10, 10 to 11, 11 to 12,
+    13 to 14, 14 to 15, 15 to 16,
+    17 to 18, 18 to 19, 19 to 20,
+    5 to 9, 9 to 13, 13 to 17
+)
+
+/** Squelette 21 points superposé à l'aperçu caméra. Lecture d'état en phase de dessin. */
+@Composable
+private fun HandSkeletonOverlay(gestureState: State<HandGestureState>) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val state = gestureState.value
+        val frameColor = if (state.isHandDetected) StarkCyan else StarkGold
+
+        // Coins de visée du cadre.
+        val cornerLength = 14f
+        val cornerStroke = 2.5f
+        val w = size.width
+        val h = size.height
+        for ((cx, cy, sx, sy) in listOf(
+            Quad(8f, 8f, 1f, 1f),
+            Quad(w - 8f, 8f, -1f, 1f),
+            Quad(8f, h - 8f, 1f, -1f),
+            Quad(w - 8f, h - 8f, -1f, -1f)
+        )) {
+            drawLine(frameColor, Offset(cx, cy), Offset(cx + sx * cornerLength, cy), strokeWidth = cornerStroke)
+            drawLine(frameColor, Offset(cx, cy), Offset(cx, cy + sy * cornerLength), strokeWidth = cornerStroke)
+        }
+
+        val landmarks = state.landmarks
+        if (landmarks.size < HandLandmarks.COUNT || !state.isHandDetected) {
+            if (!state.isHandDetected) {
+                // Balayage radar pendant la recherche.
+                val scanY = (System.currentTimeMillis() % 2000) / 2000f * h
+                drawLine(StarkGold.copy(alpha = 0.6f), Offset(0f, scanY), Offset(w, scanY), strokeWidth = 1.5f)
+            }
+            return@Canvas
+        }
+
+        var minX = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+
+        for (bone in HAND_BONES) {
+            val a = landmarks[bone.first]
+            val b = landmarks[bone.second]
+            drawLine(
+                color = if (bone.second == 4 || bone.second == 8) StarkGold else StarkCyan,
+                start = Offset(a.x * w, a.y * h),
+                end = Offset(b.x * w, b.y * h),
+                strokeWidth = 2.5f
+            )
+        }
+
+        landmarks.forEachIndexed { index, point ->
+            val x = point.x * w
+            val y = point.y * h
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+
+            val jointColor = when (index) {
+                HandLandmarks.WRIST -> StarkRed
+                HandLandmarks.THUMB_TIP -> StarkGold
+                HandLandmarks.INDEX_TIP ->
+                    if (state.gesture == GestureType.PINCH) StarkGold else StarkCyan
+                else -> StarkCyan.copy(alpha = 0.85f)
+            }
+            val radius = if (index == HandLandmarks.INDEX_TIP || index == HandLandmarks.THUMB_TIP) 5.5f else 3.5f
+            drawCircle(jointColor, radius = radius, center = Offset(x, y))
+        }
+
+        drawRect(
+            color = StarkCyan.copy(alpha = 0.5f),
+            topLeft = Offset(
+                (minX - 10f).coerceAtLeast(4f),
+                (minY - 10f).coerceAtLeast(4f)
+            ),
+            size = Size(
+                (maxX - minX + 20f).coerceAtMost(w - 8f),
+                (maxY - minY + 20f).coerceAtMost(h - 8f)
+            ),
+            style = Stroke(width = 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
+        )
+    }
+}
+
+private data class Quad(val x: Float, val y: Float, val sx: Float, val sy: Float)
+
+/** Retour haptique court, sans exception si l'appareil n'a pas de vibreur. */
+@Composable
+private fun rememberHapticFeedback(): () -> Unit {
+    val context = LocalContext.current
+    val vibrator = remember(context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    }
+    return remember(vibrator) {
+        {
+            try {
+                vibrator?.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
+
+/** Énumère les applications lançables. Opération d'E/S : à exécuter hors thread principal. */
+private fun loadLauncherApps(context: Context): List<LauncherAppItem> {
+    val packageManager = context.packageManager
+    val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+        addCategory(Intent.CATEGORY_LAUNCHER)
+    }
+
+    val apps = packageManager.queryIntentActivities(mainIntent, 0)
+        .asSequence()
+        .filter { it.activityInfo.packageName != context.packageName }
+        .distinctBy { it.activityInfo.packageName }
+        .sortedBy { it.loadLabel(packageManager).toString().lowercase() }
+        .take(MAX_ORBIT_APPS)
+        .map { info ->
+            LauncherAppItem(
+                label = info.loadLabel(packageManager).toString(),
+                packageName = info.activityInfo.packageName,
+                iconBitmap = runCatching { info.loadIcon(packageManager).toBitmap(96, 96) }.getOrNull()
+            )
+        }
+        .toList()
+
+    if (apps.isNotEmpty()) return apps
+
+    return listOf(
+        LauncherAppItem("JARVIS Core", "com.android.settings", null, Icons.Default.Security),
+        LauncherAppItem("Arc Diagnostics", "com.android.camera2", null, Icons.Default.Camera),
+        LauncherAppItem("Stark Tech", "com.android.settings", null, Icons.Default.Memory),
+        LauncherAppItem("System Config", "com.android.settings", null, Icons.Default.Settings)
+    )
+}
+
+private fun launchApp(context: Context, packageName: String) {
+    try {
+        context.packageManager.getLaunchIntentForPackage(packageName)?.let { context.startActivity(it) }
+    } catch (_: Exception) {
     }
 }
