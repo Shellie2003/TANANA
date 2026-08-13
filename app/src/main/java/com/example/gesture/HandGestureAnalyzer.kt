@@ -3,7 +3,10 @@ package com.example.gesture
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.os.Build
 import android.os.SystemClock
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -159,8 +162,26 @@ class HandGestureAnalyzer(
         }
 
         visionUnavailable = true
-        visionError = failures.lastOrNull() ?: "cause inconnue"
-        Log.e(TAG, "Suivi de main indisponible. Tentatives: ${failures.joinToString(" | ")}")
+        visionError = buildString {
+            append(deviceDiagnostics())
+            append('\n')
+            append(failures.lastOrNull() ?: "cause inconnue")
+        }
+        Log.e(TAG, "Suivi de main indisponible. ${deviceDiagnostics()} | ${failures.joinToString(" | ")}")
+    }
+
+    /**
+     * Mesures de l'appareil jointes au message d'erreur.
+     *
+     * La taille de page est la donnée décisive : une bibliothèque native alignée sur 4 Ko ne se
+     * charge pas sur un système en pages de 16 Ko, et rien d'autre ne permet de distinguer ce cas
+     * d'un simple échec d'initialisation. L'ABI et la version d'Android complètent le tableau.
+     */
+    private fun deviceDiagnostics(): String {
+        val pageSizeKo = runCatching { Os.sysconf(OsConstants._SC_PAGESIZE) / 1024 }.getOrNull()
+        val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "?"
+        return "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) · $abi · " +
+            "pages ${pageSizeKo?.toString() ?: "?"} Ko · ${Build.MANUFACTURER} ${Build.MODEL}"
     }
 
     /**

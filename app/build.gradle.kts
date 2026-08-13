@@ -21,6 +21,15 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Identité du build, affichée dans l'interface. Sans elle, impossible de savoir quelle
+    // version tourne réellement sur un appareil : le nom de l'APK publiée ne change jamais,
+    // si bien qu'un cache de navigateur peut resservir une version antérieure sans que rien
+    // ne le signale. Lu via providers pour rester compatible avec le cache de configuration.
+    val gitSha = providers.environmentVariable("GITHUB_SHA").orNull?.take(7) ?: "local"
+    val buildNumber = providers.environmentVariable("GITHUB_RUN_NUMBER").orNull ?: "dev"
+    buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+    buildConfigField("String", "BUILD_NUMBER", "\"$buildNumber\"")
   }
 
   // Les keystores ne sont pas versionnés. Les configurations de signature ne sont donc créées

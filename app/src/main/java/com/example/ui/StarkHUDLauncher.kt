@@ -103,6 +103,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.drawable.toBitmap
+import com.example.BuildConfig
 import com.example.gesture.GestureType
 import com.example.gesture.HandGestureState
 import com.example.gesture.HandLandmarks
@@ -596,7 +597,10 @@ fun StarkHeaderHUD(
     ) {
         Column {
             Text(
-                text = "JARVIS OS // v4.2",
+                // L'identité du build est affichée en permanence : c'est le seul moyen de savoir
+                // quelle version tourne réellement sur l'appareil, le nom de l'APK publiée étant
+                // toujours le même.
+                text = "JARVIS OS // build ${BuildConfig.BUILD_NUMBER} · ${BuildConfig.GIT_SHA}",
                 color = StarkCyan,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -764,16 +768,24 @@ fun StarkFooterGestureHUD(
         // La cause exacte de la panne est affichée sous le badge : un échec de chargement du
         // modèle n'apparaissait auparavant que dans logcat, hors de portée de l'utilisateur.
         visionError?.let { detail ->
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = detail,
-                color = StarkRed.copy(alpha = 0.85f),
-                fontSize = 9.sp,
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.Center,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis
-            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(StarkRed.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                    .border(1.dp, StarkRed.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = detail,
+                    color = StarkRed,
+                    fontSize = 10.sp,
+                    lineHeight = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(10.dp))
