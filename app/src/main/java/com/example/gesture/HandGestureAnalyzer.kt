@@ -47,7 +47,9 @@ data class HandGestureState(
     /** Cause de l'indisponibilité, affichée à l'écran pour rendre la panne diagnosticable. */
     val visionError: String? = null,
     /** Front montant du pincement : une seule frame, à consommer comme un clic. */
-    val pinchClickTick: Long = 0L
+    val pinchClickTick: Long = 0L,
+    /** Vrai sur la seule frame où la pose change : déclenche les actions ponctuelles. */
+    val isNewPose: Boolean = false
 )
 
 interface HandGestureListener {
@@ -420,6 +422,7 @@ class HandGestureAnalyzer(
                 gesture = gestureResult.gesture,
                 pinchStrength = gestureResult.pinchStrength,
                 confidence = gestureResult.confidence,
+                isNewPose = gestureResult.isNewPose,
                 palmRotationDeg = metrics.palmRotationDeg,
                 landmarks = landmarks,
                 fps = currentFps,

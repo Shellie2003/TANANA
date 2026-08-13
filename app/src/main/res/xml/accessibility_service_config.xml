@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Configuration minimale : le service n'a besoin d'exécuter que des actions globales
-  (Retour, Accueil, Récents). Il ne s'abonne à aucun type d'évènement et ne lit pas le contenu
-  des fenêtres, ce qui réduit d'autant la surface de données accessible et la charge système
-  par rapport à la configuration précédente (typeAllMask + canRetrieveWindowContent).
+  canPerformGestures est indispensable : sans lui, dispatchGesture est refusé et le service ne
+  peut qu'exécuter les actions globales. Le service ne s'abonne à aucun évènement et ne lit pas
+  le contenu des fenêtres : il émet, il n'observe pas.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
     android:canRetrieveWindowContent="false"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="100"

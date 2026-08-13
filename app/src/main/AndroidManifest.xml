@@ -4,13 +4,25 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!--
+      Le contrôle gestuel doit survivre à la sortie de l'application : c'est tout l'objet d'un
+      service de premier plan de type caméra. Android impose en contrepartie une notification
+      permanente, que l'utilisateur peut utiliser pour arrêter le service.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Dessin du curseur au-dessus des autres applications. Accordée par l'utilisateur dans
+         les réglages, jamais par une simple invite. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <!--
-      Visibilité des applications installées.
-      Une déclaration <queries> ciblée remplace la permission QUERY_ALL_PACKAGES : elle suffit à
-      énumérer les applications lançables et évite une permission à usage restreint.
+      Visibilité des applications installées. Une déclaration <queries> ciblée remplace la
+      permission QUERY_ALL_PACKAGES, à usage restreint.
     -->
     <queries>
         <intent>
@@ -44,6 +56,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".service.StarkVisionService"
+            android:exported="false"
+            android:foregroundServiceType="camera" />
 
         <service
             android:name=".service.StarkAccessibilityService"

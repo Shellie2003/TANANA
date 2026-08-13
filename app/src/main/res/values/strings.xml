@@ -1,5 +1,12 @@
 <resources>
     <string name="app_name">Stark Launcher</string>
+
     <string name="accessibility_service_label">Stark HUD — commandes gestuelles</string>
-    <string name="accessibility_service_description">Permet au Stark HUD Launcher d\'exécuter les actions système Retour, Accueil et Applications récentes à partir des gestes de la main détectés par la caméra.</string>
+    <string name="accessibility_service_description">Permet au Stark HUD Launcher d\'exécuter des appuis, des défilements et les actions Retour, Accueil et Applications récentes à partir des gestes de la main détectés par la caméra.</string>
+
+    <string name="vision_channel_name">Contrôle gestuel</string>
+    <string name="vision_channel_description">Notification permanente indiquant que la caméra est utilisée pour le contrôle gestuel.</string>
+    <string name="vision_notification_title">Contrôle gestuel actif</string>
+    <string name="vision_notification_text">La caméra frontale suit votre main pour piloter le téléphone.</string>
+    <string name="vision_notification_stop">Arrêter</string>
 </resources>

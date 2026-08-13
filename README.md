@@ -55,16 +55,42 @@ Calibration du filtre, mesurée par balayage paramétrique (30 img/s, coordonné
 
 ## Gestes
 
+Les poses sont discriminables par le seul décompte des doigts tendus — le signal le plus robuste
+que fournisse un suivi monoculaire. Deux poses ne différant que par un angle subtil seraient
+confondues dès que la main pivote.
+
 | Geste | Action |
 |---|---|
-| Main ouverte / index tendu | Déplacement du curseur holographique |
-| Pincer (pouce + index) | Clic sur l'application survolée |
-| Poing | Retour système (via le service d'accessibilité) |
-| Balayage gauche / droite | Rotation de l'anneau d'applications |
+| Index seul | Déplace le curseur |
+| Pouce + index (pincement) | Clic ; glisser si maintenu |
+| Index + majeur | Défilement vertical |
+| Trois doigts | Applications récentes ; un balayage y navigue |
+| Main ouverte | Lecture / pause du média |
+| Poing | Retour |
+| Pouce levé | Accueil |
+
+## Contrôle à l'échelle du système
+
+Les gestes agissent sur tout le téléphone, pas seulement dans cette application. Trois briques
+le permettent, et chacune exige une autorisation que l'utilisateur accorde explicitement :
+
+| Brique | Rôle | Autorisation |
+|---|---|---|
+| `StarkVisionService` | garde la caméra active en arrière-plan | service de premier plan `camera` + notification |
+| `CursorOverlayView` | dessine le curseur au-dessus des applications | affichage par-dessus les applications |
+| `StarkAccessibilityService` | injecte appuis, glissers et défilements | service d'accessibilité |
+
+Le service d'accessibilité est le seul moyen pour une application d'agir en dehors d'elle-même :
+`dispatchGesture` synthétise des appuis n'importe où à l'écran, `performGlobalAction` déclenche
+Retour, Accueil et Récents. La commutation rapide entre applications est un balayage synthétisé
+le long du bord inférieur — le geste de navigation système —, avec l'écran des récents en repli.
+
+La décision (`GesturePolicy`) est séparée de son exécution : la politique est du Kotlin pur, donc
+vérifiable sans appareil, sans caméra et sans service.
 
 ## Tests
 
-Les composants de précision sont couverts par 40 tests JVM (exécution en quelques dizaines de
+Les composants de précision et la politique de commande sont couverts par 67 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash

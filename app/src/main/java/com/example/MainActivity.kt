@@ -1,229 +1,237 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
-import android.util.Log
+import android.provider.Settings
+import android.text.TextUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.AspectRatioStrategy
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
+import androidx.core.graphics.drawable.toBitmap
 import com.example.gesture.GestureType
-import com.example.gesture.HandGestureAnalyzer
-import com.example.gesture.HandGestureListener
-import com.example.gesture.HandGestureState
 import com.example.service.StarkAccessibilityService
-import com.example.ui.StarkHUDLauncher
+import com.example.service.StarkVisionService
+import com.example.ui.EngineStatus
+import com.example.ui.LauncherAppItem
+import com.example.ui.SetupStep
+import com.example.ui.StarkControlCenter
 import com.example.ui.theme.StarkHUDTheme
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import java.util.concurrent.Executors
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
- * Activity principale du Stark HUD Launcher.
+ * Écran principal : centre de contrôle et lanceur d'applications.
  *
- * Responsabilités : cycle de vie de CameraX, publication de l'état gestuel vers Compose et
- * traduction des gestes globaux en actions d'accessibilité.
+ * L'activité ne pilote plus la caméra elle-même. Toute la vision vit désormais dans
+ * [StarkVisionService], pour deux raisons : le contrôle gestuel doit survivre à la sortie de
+ * l'application, et deux clients caméra simultanés seraient de toute façon refusés par le système.
+ * L'activité se contente donc de configurer, d'allumer, et d'observer.
  */
-class MainActivity : ComponentActivity(), HandGestureListener {
+class MainActivity : ComponentActivity() {
 
-    private companion object {
-        const val TAG = "StarkLauncher"
+    private var cameraGranted by mutableStateOf(false)
+    private var overlayGranted by mutableStateOf(false)
+    private var accessibilityGranted by mutableStateOf(false)
+    private var notificationsGranted by mutableStateOf(true)
 
-        /**
-         * Résolution d'analyse. 640x480 est le meilleur compromis mesuré : au-dessus, la latence
-         * d'inférence croît sans gain de précision (le détecteur de paume redimensionne l'entrée
-         * en interne) ; en dessous, les extrémités des doigts deviennent trop bruitées.
-         */
-        const val ANALYSIS_WIDTH = 640
-        const val ANALYSIS_HEIGHT = 480
+    private var status by mutableStateOf(
+        EngineStatus(false, GestureType.IDLE, 0f, 0, 0, null)
+    )
+    private var apps by mutableStateOf<List<LauncherAppItem>>(emptyList())
 
-        /** Intervalle minimal entre deux actions système déclenchées au geste. */
-        const val GLOBAL_ACTION_COOLDOWN_MS = 900L
-    }
-
-    /**
-     * État gestuel exposé comme [androidx.compose.runtime.MutableState] et non comme valeur :
-     * l'interface le lit en phase de dessin, ce qui évite de recomposer l'arbre 30 fois par seconde.
-     */
-    private val gestureState = mutableStateOf(HandGestureState())
-    private var gestureAnalyzer: HandGestureAnalyzer? = null
-    private val cameraExecutor = Executors.newSingleThreadExecutor()
-
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var previewView: PreviewView? = null
-    private var hasCameraPermission = false
-
-    /** Front montant du geste « poing » : l'action ne doit partir qu'une fois par geste. */
-    private var lastGesture = GestureType.IDLE
-    private var lastGlobalActionAt = 0L
-
-    private val requestPermissionLauncher = registerForActivityResult(
+    private val requestCamera = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        hasCameraPermission = isGranted
-        if (isGranted) bindCamera()
-    }
+    ) { granted -> cameraGranted = granted }
+
+    private val requestNotifications = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> notificationsGranted = granted }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        gestureAnalyzer = HandGestureAnalyzer(applicationContext, this)
-
-        hasCameraPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!hasCameraPermission) {
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        refreshPermissions()
 
         setContent {
             StarkHUDTheme {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    StarkHUDLauncher(
-                        gestureState = gestureState,
-                        onBindPreview = { view ->
-                            // L'aperçu apparaît et disparaît avec la fenêtre PIP : on relie
-                            // la surface au cas déjà lié plutôt que de reconstruire la caméra.
-                            previewView = view
-                            bindCamera()
-                        },
-                        onReleasePreview = {
-                            previewView = null
-                            bindCamera()
-                        },
-                        onSimulatePosition = { x, y, isPinch, isFist ->
-                            gestureAnalyzer?.updateSimulatedPosition(x, y, isPinch, isFist)
-                        },
-                        onSimulationModeChanged = { enabled ->
-                            gestureAnalyzer?.setSimulationMode(enabled)
-                        }
-                    )
-                }
-            }
-        }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        if (hasCameraPermission) bindCamera()
-    }
-
-    /**
-     * (Re)lie les cas d'usage caméra. Idempotent : un appel supplémentaire reconstruit la
-     * liaison proprement au lieu d'empiler des `unbindAll()` concurrents comme précédemment.
-     */
-    private fun bindCamera() {
-        if (!hasCameraPermission) return
-
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
-            try {
-                val provider = future.get()
-                cameraProvider = provider
-
-                val resolutionSelector = ResolutionSelector.Builder()
-                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            android.util.Size(ANALYSIS_WIDTH, ANALYSIS_HEIGHT),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                // Rafraîchissement de la télémétrie. 5 Hz suffit à l'affichage : le service, lui,
+                // traite les gestes à la cadence de la caméra.
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        val state = StarkVisionService.latestState
+                        status = EngineStatus(
+                            isRunning = StarkVisionService.isRunning,
+                            gesture = state?.gesture ?: GestureType.IDLE,
+                            confidence = state?.confidence ?: 0f,
+                            fps = state?.fps ?: 0,
+                            latencyMs = state?.latencyMs ?: 0,
+                            visionError = state?.visionError
                         )
-                    )
-                    .build()
+                        delay(200)
+                    }
+                }
 
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setResolutionSelector(resolutionSelector)
-                    // Seule la frame la plus récente compte : accumuler du retard rendrait le
-                    // curseur inutilisable.
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    // Sortie RGBA : évite une conversion YUV -> RGB logicielle par image.
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .build()
+                LaunchedEffect(Unit) {
+                    apps = withContext(Dispatchers.IO) { loadLauncherApps() }
+                }
 
-                gestureAnalyzer?.let { imageAnalysis.setAnalyzer(cameraExecutor, it) }
-
-                provider.unbindAll()
-
-                val view = previewView
-                if (view != null) {
-                    val preview = Preview.Builder()
-                        .setResolutionSelector(resolutionSelector)
-                        .build()
-                    preview.setSurfaceProvider(view.surfaceProvider)
-                    provider.bindToLifecycle(
-                        this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalysis
-                    )
-                } else {
-                    provider.bindToLifecycle(
-                        this, CameraSelector.DEFAULT_FRONT_CAMERA, imageAnalysis
+                Box(modifier = Modifier.fillMaxSize()) {
+                    StarkControlCenter(
+                        status = status,
+                        setupSteps = buildSetupSteps(),
+                        apps = apps,
+                        onToggleEngine = ::toggleEngine,
+                        onLaunchApp = ::launchApp
                     )
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Liaison caméra impossible", e)
             }
-        }, ContextCompat.getMainExecutor(this))
+        }
     }
 
-    override fun onHandGestureUpdated(state: HandGestureState) {
-        // Le callback arrive sur le thread d'analyse : on repasse sur le thread principal, seul
-        // habilité à écrire un MutableState lu par Compose.
-        lifecycleScope.launch(Dispatchers.Main.immediate) {
-            gestureState.value = state
-            handleGlobalGesture(state.gesture)
+    override fun onResume() {
+        super.onResume()
+        // Les autorisations de superposition et d'accessibilité se règlent dans les paramètres
+        // système : leur état ne peut être constaté qu'au retour dans l'application.
+        refreshPermissions()
+    }
+
+    private fun refreshPermissions() {
+        cameraGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        overlayGranted = Settings.canDrawOverlays(this)
+        accessibilityGranted = isAccessibilityServiceEnabled()
+        notificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            true
         }
     }
 
     /**
-     * Le geste « poing » déclenche un retour système. Il est traité en front montant et avec un
-     * temps de garde : maintenu, il produisait auparavant une action par image, soit une trentaine
-     * de retours par seconde.
+     * Détermine si le service d'accessibilité est activé.
+     *
+     * `StarkAccessibilityService.isConnected` ne suffirait pas : le service n'est instancié
+     * qu'une fois activé, or l'activité doit connaître l'état *avant* cela pour afficher l'étape
+     * de configuration. On interroge donc le réglage système.
      */
-    private fun handleGlobalGesture(gesture: GestureType) {
-        val previous = lastGesture
-        lastGesture = gesture
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expected = "$packageName/${StarkAccessibilityService::class.java.name}"
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
 
-        if (gesture != GestureType.FIST || previous == GestureType.FIST) return
+        val splitter = TextUtils.SimpleStringSplitter(':')
+        splitter.setString(enabled)
+        while (splitter.hasNext()) {
+            if (splitter.next().equals(expected, ignoreCase = true)) return true
+        }
+        return false
+    }
 
-        val now = SystemClock.uptimeMillis()
-        if (now - lastGlobalActionAt < GLOBAL_ACTION_COOLDOWN_MS) return
-        lastGlobalActionAt = now
+    private fun buildSetupSteps(): List<SetupStep> = listOf(
+        SetupStep(
+            title = "Accès à la caméra",
+            explanation = "La caméra frontale suit votre main. Les images ne quittent jamais " +
+                "l'appareil : l'analyse est entièrement locale.",
+            isDone = cameraGranted,
+            actionLabel = "Autoriser la caméra",
+            onAction = { requestCamera.launch(Manifest.permission.CAMERA) }
+        ),
+        SetupStep(
+            title = "Affichage par-dessus les applications",
+            explanation = "Nécessaire pour dessiner le curseur au-dessus des autres applications. " +
+                "Sans cette autorisation, vous piloteriez sans voir où vous pointez.",
+            isDone = overlayGranted,
+            actionLabel = "Ouvrir le réglage",
+            onAction = {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
+        ),
+        SetupStep(
+            title = "Service d'accessibilité",
+            explanation = "Seul ce service permet à une application d'agir en dehors d'elle-même : " +
+                "appuyer, faire défiler, revenir en arrière. Sans lui, les gestes resteront " +
+                "sans effet hors de cette application.",
+            isDone = accessibilityGranted,
+            actionLabel = "Activer dans les réglages",
+            onAction = {
+                startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        ),
+        SetupStep(
+            title = "Notifications",
+            explanation = "Android impose une notification permanente tant que la caméra est " +
+                "utilisée en arrière-plan. Elle sert aussi à arrêter le contrôle gestuel.",
+            isDone = notificationsGranted,
+            actionLabel = "Autoriser les notifications",
+            onAction = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        )
+    )
 
-        // On s'adresse directement à l'instance connectée du service ; si l'utilisateur ne l'a
-        // pas activé dans les réglages d'accessibilité, l'action est simplement sans effet.
-        if (!StarkAccessibilityService.performGlobalAction(StarkAccessibilityService.ACTION_GLOBAL_BACK)) {
-            Log.i(TAG, "Service d'accessibilité inactif : action « Retour » ignorée")
+    private fun toggleEngine(enabled: Boolean) {
+        if (enabled) StarkVisionService.start(this) else StarkVisionService.stop(this)
+    }
+
+    private fun launchApp(target: String) {
+        runCatching {
+            packageManager.getLaunchIntentForPackage(target)?.let { intent ->
+                // Chaque application obtient sa propre tâche et apparaît donc dans les
+                // applications récentes ; RESET_TASK_IF_NEEDED ramène une tâche existante au
+                // premier plan au lieu de la redémarrer.
+                intent.addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                )
+                startActivity(intent)
+            }
         }
     }
 
-    override fun onStop() {
-        super.onStop()
-        // La caméra est libérée dès que le launcher passe en arrière-plan : aucune raison de
-        // continuer à consommer batterie et capteur pendant qu'une autre application est au premier plan.
-        cameraProvider?.unbindAll()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        cameraProvider?.unbindAll()
-        cameraProvider = null
-        gestureAnalyzer?.close()
-        gestureAnalyzer = null
-        cameraExecutor.shutdown()
+    /** Énumère les applications lançables. Opération d'E/S : à exécuter hors thread principal. */
+    private fun loadLauncherApps(): List<LauncherAppItem> {
+        val pm = packageManager
+        val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        return pm.queryIntentActivities(mainIntent, 0)
+            .asSequence()
+            .filter { it.activityInfo.packageName != packageName }
+            .distinctBy { it.activityInfo.packageName }
+            .sortedBy { it.loadLabel(pm).toString().lowercase() }
+            .map { info ->
+                LauncherAppItem(
+                    label = info.loadLabel(pm).toString(),
+                    packageName = info.activityInfo.packageName,
+                    iconBitmap = runCatching { info.loadIcon(pm).toBitmap(96, 96) }.getOrNull()
+                )
+            }
+            .toList()
     }
 }

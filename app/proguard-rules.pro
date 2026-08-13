@@ -30,9 +30,10 @@
 # --- CameraX ---
 -dontwarn androidx.camera.**
 
-# --- Service d'accessibilité ---
-# Instancié par le système à partir du nom déclaré dans le manifeste.
+# --- Services ---
+# Instanciés par le système à partir des noms déclarés dans le manifeste.
 -keep class com.example.service.StarkAccessibilityService { *; }
+-keep class com.example.service.StarkVisionService { *; }
 
 # --- Modèle de données du moteur gestuel ---
 # Conservé pour que les traces de plantage restent lisibles sur le chemin critique.
