@@ -167,11 +167,14 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Garde anti-régression : l'alignement 4 Ko de MediaPipe a coûté un cycle complet de
+          # diagnostic parce qu'il ne se manifestait qu'à l'exécution, sur certains appareils.
+          # Une montée de version qui le réintroduirait doit casser le build, pas passer inaperçue.
           if [ "$misaligned" -gt 0 ]; then
-            echo "::warning::$misaligned bibliothèque(s) native(s) alignée(s) sur 4 Ko. Elles échoueront à se charger sur un appareil Android 15+ configuré en pages de 16 Ko, ce qui rend le suivi de main indisponible."
-          else
-            echo "  Toutes les bibliothèques sont compatibles 16 Ko."
+            echo "::error::$misaligned bibliothèque(s) native(s) alignée(s) sur 4 Ko. Elles échoueront à se charger sur un appareil Android 15+ configuré en pages de 16 Ko, rendant le suivi de main indisponible."
+            exit 1
           fi
+          echo "  Toutes les bibliothèques sont compatibles 16 Ko."
 
       # Les APK sont publiées comme assets de release, et non comme artefacts Actions : les
       # assets de release ne consomment pas le quota de stockage des artefacts, et l'URL de
