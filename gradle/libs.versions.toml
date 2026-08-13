@@ -41,6 +41,9 @@ secretsGradlePlugin = "2.0.1"
 googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
+# tasks-vision 0.10.14 livrait libmediapipe_tasks_vision_jni.so avec des segments ELF alignés
+# sur 4 Ko, que les appareils Android 15+ en pages de 16 Ko refusent de charger.
+mediapipeTasksVision = "0.10.26.1"
 
 
 [libraries]
@@ -96,7 +99,7 @@ firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore
 firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
-mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version = "0.10.14" }
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasksVision" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 
 

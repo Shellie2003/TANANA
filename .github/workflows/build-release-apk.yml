@@ -156,6 +156,17 @@ jobs:
             esac
           done < <(find "$work/lib" -name '*.so' 2>/dev/null | sort)
 
+          {
+            echo "### Alignement des bibliothèques natives"
+            echo ""
+            if [ "$misaligned" -gt 0 ]; then
+              echo "$misaligned bibliothèque(s) alignée(s) sur 4 Ko : le chargement échouera sur un"
+              echo "appareil Android 15+ configuré en pages de 16 Ko."
+            else
+              echo "Toutes les bibliothèques sont compatibles 16 Ko."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
           if [ "$misaligned" -gt 0 ]; then
             echo "::warning::$misaligned bibliothèque(s) native(s) alignée(s) sur 4 Ko. Elles échoueront à se charger sur un appareil Android 15+ configuré en pages de 16 Ko, ce qui rend le suivi de main indisponible."
           else
