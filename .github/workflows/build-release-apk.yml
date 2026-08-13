@@ -52,14 +52,17 @@ jobs:
       - name: Tests unitaires
         run: ./gradlew testDebugUnitTest
 
+      # Artefact secondaire : son échec (quota de stockage saturé, par exemple) ne doit pas
+      # masquer le résultat des tests eux-mêmes.
       - name: Publier les rapports de test
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: rapports-tests
           path: app/build/reports/tests/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 3
 
       # Aucun keystore n'est fourni : la configuration de signature n'est pas créée et AGP
       # produit app-release-unsigned.apk.
@@ -83,23 +86,21 @@ jobs:
             echo "Confirmé : APK non signée."
           fi
 
+      # Si cette étape échoue sur « Artifact storage quota has been hit », le problème n'est pas
+      # dans ce workflow : le quota d'artefacts est commun à tout le compte GitHub. Il faut
+      # supprimer d'anciens artefacts (Actions > Runs > Artifacts) dans les autres dépôts.
       - name: Publier l'APK
         uses: actions/upload-artifact@v4
         with:
           name: stark-launcher-release-unsigned-${{ github.sha }}
-          path: app/build/outputs/apk/release/*.apk
+          # La table de correspondance R8 voyage avec l'APK plutôt que dans un artefact
+          # distinct : un seul artefact à gérer, et l'un est inutile sans l'autre.
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/mapping/release/mapping.txt
           if-no-files-found: error
-          retention-days: 30
-
-      # Le fichier de correspondance R8 est indispensable pour désobfusquer les traces de
-      # plantage d'une build minifiée. Sans lui, l'APK publiée est indébogable.
-      - name: Publier la table de correspondance R8
-        uses: actions/upload-artifact@v4
-        with:
-          name: mapping-r8-${{ github.sha }}
-          path: app/build/outputs/mapping/release/
-          if-no-files-found: warn
-          retention-days: 30
+          # Rétention courte : le quota de stockage des artefacts est commun à tout le compte.
+          retention-days: 7
 
       - name: Récapitulatif
         if: always()
