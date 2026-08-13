@@ -111,6 +111,19 @@ googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.W
 // réactivées facilement. Room, Retrofit/Moshi/OkHttp et Coil n'étaient référencés nulle part
 // dans le code : les laisser actives alourdissait l'APK et le temps de build sans contrepartie.
 dependencies {
+  // Une dépendance transitive tire androidx.fragment antérieur à 1.3.0, dont les
+  // FragmentActivity n'appelaient pas super.onRequestPermissionsResult() et utilisaient des
+  // codes de requête invalides — ce qui casse la demande de permission caméra de MainActivity
+  // (lint InvalidFragmentVersionForActivityResult, fatal en release).
+  //
+  // Une contrainte plutôt qu'une dépendance : elle relève le plancher de version si fragment
+  // est présent dans le graphe, sans l'y ajouter s'il en est absent.
+  constraints {
+    implementation("androidx.fragment:fragment:1.3.0") {
+      because("ActivityResult exige fragment >= 1.3.0")
+    }
+  }
+
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
   implementation(libs.accompanist.permissions)
