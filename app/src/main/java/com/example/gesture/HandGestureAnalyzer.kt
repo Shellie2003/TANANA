@@ -35,6 +35,11 @@ data class HandGestureState(
     val gesture: GestureType = GestureType.IDLE,
     /** Force analogique du pincement, 0..1. */
     val pinchStrength: Float = 0f,
+    /**
+     * Distance pouce-index normalisée par la taille de paume, brute.
+     * Alimente la détection du clic par impulsion, qui raisonne sur sa dérivée.
+     */
+    val pinchRatio: Float = Float.MAX_VALUE,
     /** Confiance globale de la détection, 0..1. */
     val confidence: Float = 0f,
     val palmRotationDeg: Float = 0f,
@@ -459,6 +464,7 @@ class HandGestureAnalyzer(
                 rawCursorY = metrics.pointerY,
                 gesture = gestureResult.gesture,
                 pinchStrength = gestureResult.pinchStrength,
+                pinchRatio = metrics.pinchRatio,
                 confidence = gestureResult.confidence,
                 isNewPose = gestureResult.isNewPose,
                 powerMode = frameGate.mode,

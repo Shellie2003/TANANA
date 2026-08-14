@@ -26,56 +26,85 @@ class GesturePolicyTest {
         return all
     }
 
-    // --- Clic par immobilité ------------------------------------------------------------------
+    // --- Clic par impulsion du pouce ------------------------------------------------------
+
+    /** Ouverture du pouce, valeur de repos : ne doit jamais cliquer. */
+    private val open = 0.85f
+    private val closed = 0.15f
 
     @Test
-    fun `l immobilite du curseur declenche un appui`() {
-        val actions = hold(policy(), GestureType.POINT, frames = 40, x = 0.3f, y = 0.7f)
-        val tap = actions.filterIsInstance<SystemAction.Tap>().single()
-        assertEquals(0.3f, tap.x, 1e-5f)
-        assertEquals(0.7f, tap.y, 1e-5f)
-    }
-
-    /** Rester immobile ne doit pas produire un clic par seconde. */
-    @Test
-    fun `l immobilite prolongee ne produit qu un appui`() {
-        val actions = hold(policy(), GestureType.POINT, frames = 200)
-        assertEquals(1, actions.count { it is SystemAction.Tap })
-    }
-
-    /** Survoler sans cliquer doit rester possible : bouger annule l'appui en préparation. */
-    @Test
-    fun `bouger annule l appui en preparation`() {
+    fun `une impulsion du pouce produit un appui immediat`() {
         val p = policy()
         var t = 0L
-        var x = 0.2f
         val actions = mutableListOf<SystemAction>()
-        repeat(60) { i ->
-            actions += p.onGesture(GestureType.POINT, x, 0.5f, isNewPose = i == 0, timestampMs = t)
-            x += 0.02f
+        listOf(open, closed, open).forEachIndexed { i, ratio ->
+            actions += p.onGesture(GestureType.POINT, 0.3f, 0.7f, i == 0, t, ratio)
             t += 33
         }
-        assertTrue("un appui a été émis pendant un déplacement", actions.none { it is SystemAction.Tap })
+        val tap = actions.filterIsInstance<SystemAction.Tap>().single()
+        assertEquals(0.3f, tap.x, 1e-5f)
+        assertTrue("latence ${t}ms", t <= 100)
     }
 
+    /**
+     * Le pouce au repos près de l'index est la position naturelle du pointage. Elle ne doit
+     * produire aucun clic, même maintenue longuement.
+     */
     @Test
-    fun `la progression de l immobilite est rapportee`() {
-        val p = policy()
-        p.onGesture(GestureType.POINT, 0.5f, 0.5f, isNewPose = true, timestampMs = 0)
-        p.onGesture(GestureType.POINT, 0.5f, 0.5f, isNewPose = false, timestampMs = 300)
-        assertTrue("progression=${p.dwellProgress}", p.dwellProgress in 0.3f..0.7f)
-    }
-
-    @Test
-    fun `un nouvel appui exige d avoir quitte la zone`() {
+    fun `un pouce au repos pres de l index ne clique pas`() {
         val p = policy()
         var t = 0L
-        repeat(40) { p.onGesture(GestureType.POINT, 0.5f, 0.5f, isNewPose = it == 0, timestampMs = t); t += 33 }
+        val actions = mutableListOf<SystemAction>()
+        repeat(120) { i ->
+            actions += p.onGesture(GestureType.POINT, 0.5f, 0.5f, i == 0, t, closed)
+            t += 33
+        }
+        assertTrue(actions.none { it is SystemAction.Tap })
+    }
 
-        // Déplacement franc, puis immobilité de nouveau.
-        val second = mutableListOf<SystemAction>()
-        repeat(40) { second += p.onGesture(GestureType.POINT, 0.8f, 0.5f, isNewPose = false, timestampMs = t); t += 33 }
-        assertEquals(1, second.count { it is SystemAction.Tap })
+    /** Vitesse de clic : plusieurs impulsions rapprochées doivent toutes passer. */
+    @Test
+    fun `des clics rapproches sont tous transmis`() {
+        val p = policy()
+        var t = 0L
+        var taps = 0
+        repeat(5) {
+            listOf(open, closed, open, open, open, open, open, open).forEach { ratio ->
+                taps += p.onGesture(GestureType.POINT, 0.5f, 0.5f, false, t, ratio)
+                    .count { a -> a is SystemAction.Tap }
+                t += 33
+            }
+        }
+        assertEquals(5, taps)
+    }
+
+    @Test
+    fun `l immobilite ne clique plus par defaut`() {
+        val p = policy()
+        var t = 0L
+        val actions = mutableListOf<SystemAction>()
+        repeat(120) { i ->
+            actions += p.onGesture(GestureType.POINT, 0.5f, 0.5f, i == 0, t, open)
+            t += 33
+        }
+        assertTrue("un clic par attente a été émis", actions.none { it is SystemAction.Tap })
+    }
+
+    @Test
+    fun `un pouce maintenu ferme puis deplace produit un glisser`() {
+        val p = policy()
+        var t = 0L
+        val actions = mutableListOf<SystemAction>()
+        actions += p.onGesture(GestureType.POINT, 0.2f, 0.2f, true, t, open); t += 33
+        actions += p.onGesture(GestureType.POINT, 0.2f, 0.2f, false, t, closed); t += 33
+        repeat(20) { actions += p.onGesture(GestureType.POINT, 0.2f, 0.2f, false, t, closed); t += 33 }
+        repeat(5) { actions += p.onGesture(GestureType.POINT, 0.8f, 0.8f, false, t, closed); t += 33 }
+        actions += p.onGesture(GestureType.POINT, 0.8f, 0.8f, false, t, open)
+
+        assertTrue(actions.any { it is SystemAction.DragStart })
+        val drag = actions.filterIsInstance<SystemAction.Drag>().single()
+        assertEquals(0.2f, drag.fromX, 1e-5f)
+        assertEquals(0.8f, drag.toX, 1e-5f)
     }
 
     // --- Pincement ----------------------------------------------------------------------------

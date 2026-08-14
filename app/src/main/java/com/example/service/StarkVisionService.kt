@@ -349,7 +349,8 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             cursorX = cursorX,
             cursorY = cursorY,
             isNewPose = state.isNewPose,
-            timestampMs = SystemClock.uptimeMillis()
+            timestampMs = SystemClock.uptimeMillis(),
+            pinchRatio = state.pinchRatio
         )
 
         for (action in actions) {

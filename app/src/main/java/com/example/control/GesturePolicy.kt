@@ -1,5 +1,6 @@
 package com.example.control
 
+import com.example.gesture.ClickDetector
 import com.example.gesture.GestureType
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -9,17 +10,16 @@ import kotlin.math.hypot
  *
  * ## Le clic
  *
- * Le clic principal n'est plus un geste mais une **immobilité** : arrêter le curseur sur une cible
- * pendant un court instant déclenche l'appui. C'est la méthode retenue depuis des décennies par
- * les interfaces de commande oculaire et céphalique, pour une raison simple — viser et cliquer
- * deviennent le même geste. Le pincement demandait au contraire de coordonner deux doigts *sans
- * bouger la main*, ce qui déplace la cible au moment précis où l'on valide.
+ * Le clic est une **impulsion du pouce** : un aller-retour bref vers l'index, détecté par sa
+ * vitesse de fermeture et non par une position. Voir [ClickDetector] pour le raisonnement complet.
+ * Il part en moins de 100 ms, ne se déclenche jamais sur un pouce au repos, et ne déplace pas la
+ * cible puisque le curseur suit l'index, qui ne bouge pas.
  *
- * Un anneau de progression accompagne l'attente : l'utilisateur voit le clic se préparer et peut
- * l'annuler en bougeant. Cette prévisibilité est ce qui fait la confiance dans le pointage.
+ * Maintenir le pouce fermé prolonge le geste en glisser ou en appui long, sans rien à apprendre
+ * de plus.
  *
- * Le pincement reste disponible : maintenu immobile il produit un appui long, déplacé il produit
- * un glisser.
+ * Le clic par immobilité reste disponible en option ([Config.dwellEnabled]) : il ne demande aucune
+ * dextérité et sert de repli d'accessibilité, au prix d'une attente incompatible avec la vitesse.
  *
  * ## Principes
  *
@@ -44,8 +44,11 @@ class GesturePolicy(
         val actionCooldownMs: Long = 700L,
         /** En deçà de ce déplacement, un pincement relâché est un appui ; au-delà, un glisser. */
         val tapMaxTravel: Float = 0.03f,
-        /** Clic par immobilité : activé par défaut. */
-        val dwellEnabled: Boolean = true,
+        /**
+         * Clic par immobilité. Désactivé par défaut : l'attente qu'il impose est incompatible
+         * avec une cadence de clic rapide. Reste proposé comme repli d'accessibilité.
+         */
+        val dwellEnabled: Boolean = false,
         /** Rayon dans lequel le curseur doit rester pour que l'immobilité soit reconnue. */
         val dwellRadius: Float = 0.030f,
         /** Durée d'immobilité déclenchant l'appui. */
@@ -65,6 +68,7 @@ class GesturePolicy(
     private var hasAnchor = false
 
     private val lastActionAt = HashMap<String, Long>()
+    private val clickDetector = ClickDetector()
 
     // État du clic par immobilité.
     private var dwellX = 0f
@@ -76,6 +80,9 @@ class GesturePolicy(
     var dwellProgress: Float = 0f
         private set
 
+    /** Progression du maintien du pouce, 0..1 : annonce la bascule du clic vers le glisser. */
+    val holdProgress: Float get() = clickDetector.holdProgress
+
     fun updateBindings(bindings: GestureBindings) {
         this.bindings = bindings
     }
@@ -85,6 +92,7 @@ class GesturePolicy(
         dragging = false
         hasAnchor = false
         lastActionAt.clear()
+        clickDetector.reset()
         resetDwell()
     }
 
@@ -107,7 +115,8 @@ class GesturePolicy(
         cursorX: Float,
         cursorY: Float,
         isNewPose: Boolean,
-        timestampMs: Long
+        timestampMs: Long,
+        pinchRatio: Float = Float.MAX_VALUE
     ): List<SystemAction> {
         val actions = mutableListOf<SystemAction>()
 
@@ -137,6 +146,7 @@ class GesturePolicy(
         when (binding) {
             BindableAction.CURSOR -> {
                 actions += SystemAction.MoveCursor(cursorX, cursorY)
+                actions += click(pinchRatio, cursorX, cursorY, timestampMs)
                 dwell(cursorX, cursorY, timestampMs)?.let { actions += it }
             }
 
@@ -182,6 +192,38 @@ class GesturePolicy(
 
         return actions
     }
+
+    /**
+     * Clic par impulsion du pouce, et prolongation en glisser.
+     *
+     * Le maintien se résout à son terme comme un clic de souris : un déplacement négligeable
+     * pendant le maintien donne un appui long, un déplacement franc un glisser.
+     */
+    private fun click(pinchRatio: Float, x: Float, y: Float, now: Long): List<SystemAction> =
+        when (clickDetector.update(pinchRatio, x, y, now)) {
+            ClickDetector.Event.CLICK ->
+                listOf(SystemAction.Tap(clickDetector.anchorX, clickDetector.anchorY))
+
+            ClickDetector.Event.HOLD_START -> {
+                dragStartX = clickDetector.anchorX
+                dragStartY = clickDetector.anchorY
+                dragStartedAt = now
+                listOf(SystemAction.DragStart(dragStartX, dragStartY))
+            }
+
+            ClickDetector.Event.HOLD_END -> {
+                val travel = hypot(x - dragStartX, y - dragStartY)
+                listOf(
+                    if (travel >= config.tapMaxTravel) {
+                        SystemAction.Drag(dragStartX, dragStartY, x, y)
+                    } else {
+                        SystemAction.LongPress(dragStartX, dragStartY)
+                    }
+                )
+            }
+
+            ClickDetector.Event.NONE -> emptyList()
+        }
 
     /**
      * Clic par immobilité.
