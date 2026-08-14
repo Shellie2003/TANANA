@@ -148,24 +148,38 @@ jobs:
           # Le moteur de vision a fonctionné en debug et échoué en release pendant plusieurs
           # itérations : les deux variantes ne diffèrent que par R8, qui supprimait ou renommait
           # des classes que seul le code natif référence. Rien ne le signale à la compilation.
-          # On compare donc ce que chaque variante conserve réellement.
-          echo "## Classes critiques conservées par R8"
-          missing=0
+          #
+          # Le critère est comparatif, et non absolu : exiger la présence d'un symbole dans
+          # l'archive minifiée produit de faux positifs, car certaines dépendances — TensorFlow
+          # Lite par exemple — vivent dans les bibliothèques natives et n'ont aucune classe Java.
+          # Ce qui compte est donc l'écart : un symbole présent en debug et absent en release est
+          # une classe que la minification a retirée.
+          echo "## Effet de R8 sur les classes critiques"
+          stripped=0
           for symbol in \
             "com/google/mediapipe/tasks/vision/handlandmarker/HandLandmarker" \
-            "AutoValue_HandLandmarker" \
             "com/google/mediapipe/tasks/core/BaseOptions" \
+            "com/google/mediapipe/framework/image/BitmapImageBuilder" \
+            "AutoValue_HandLandmarker" \
+            "com/google/protobuf" \
             "org/tensorflow/lite"
           do
-            if unzip -p "$RELEASE_APK" 'classes*.dex' | grep -aqF "$symbol"; then
-              echo "  présent : $symbol"
+            in_debug=no
+            in_release=no
+            unzip -p "$DEBUG_APK" 'classes*.dex' | grep -aqF "$symbol" && in_debug=yes
+            unzip -p "$RELEASE_APK" 'classes*.dex' | grep -aqF "$symbol" && in_release=yes
+
+            if [ "$in_debug" = yes ] && [ "$in_release" = no ]; then
+              echo "::error::$symbol retiré par la minification (présent en debug, absent en release)."
+              stripped=$((stripped + 1))
+            elif [ "$in_debug" = no ]; then
+              echo "  hors dex (code natif) : $symbol"
             else
-              echo "::error::$symbol absent de l'APK minifiée : R8 l'a supprimé ou renommé."
-              missing=$((missing + 1))
+              echo "  conservé : $symbol"
             fi
           done
-          if [ "$missing" -gt 0 ]; then
-            echo "::error::$missing symbole(s) critique(s) manquant(s). Le moteur de vision échouera en release."
+          if [ "$stripped" -gt 0 ]; then
+            echo "::error::$stripped classe(s) supprimée(s) par R8. Le moteur de vision échouera en release."
             exit 1
           fi
 
