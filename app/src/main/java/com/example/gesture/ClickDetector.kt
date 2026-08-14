@@ -15,8 +15,8 @@ package com.example.gesture
  *
  *  - **Immédiat** : le clic part au relâchement du pouce, soit environ 150 ms, sans attente
  *    imposée.
- *  - **Non déclenchable au repos** : un pouce simplement posé près de l'index ne produit aucune
- *    vitesse de fermeture, donc aucun clic. C'est le critère qui manquait.
+ *  - **Non déclenchable au repos** : un pouce simplement posé près de l'index n'a parcouru aucune
+ *    amplitude, donc ne produit aucun clic. C'est le critère qui manquait.
  *  - **Le curseur ne bouge pas** : seul le pouce se déplace, alors que le curseur suit le bout de
  *    l'index. Contrairement au clic de souris par flexion du doigt de visée, la cible reste donc
  *    parfaitement immobile pendant la validation.
@@ -34,10 +34,22 @@ class ClickDetector(private val config: Config = Config()) {
         /** Ratio au-dessus duquel il est de nouveau ouvert. Écart = hystérésis. */
         val openRatio: Float = 0.46f,
         /**
-         * Vitesse minimale de fermeture, en unités de ratio par seconde. C'est le critère
-         * décisif : il sépare un pouce que l'on approche volontairement d'un pouce déjà là.
+         * Amplitude minimale de fermeture : écart entre l'ouverture maximale récente et la
+         * position fermée. Une impulsion franche parcourt environ 0,7 ; une main qui se
+         * repositionne ne franchit pas 0,3 d'un coup.
          */
-        val minCloseSpeed: Float = 0.9f,
+        val minAmplitude: Float = 0.30f,
+        /**
+         * Durée maximale de la fermeture. C'est le second critère, et le plus discriminant :
+         * une impulsion volontaire dure une centaine de millisecondes, un repositionnement
+         * plusieurs centaines.
+         *
+         * Amplitude et durée remplacent la vitesse instantanée, qui était mesurée sur une seule
+         * image et donc trop bruitée à 30 images par seconde pour servir de critère unique.
+         */
+        val maxCloseMs: Long = 260L,
+        /** Fenêtre sur laquelle on retient l'ouverture maximale servant de référence. */
+        val amplitudeWindowMs: Long = 400L,
         /** Au-delà de cette durée, le pouce fermé n'est plus un clic mais un maintien. */
         val maxDurationMs: Long = 400L,
         /** Intervalle minimal entre deux clics, pour absorber les rebonds. */
@@ -62,9 +74,17 @@ class ClickDetector(private val config: Config = Config()) {
     private var closed = false
     private var closedAt = 0L
     private var holding = false
-    private var lastRatio = Float.NaN
-    private var lastTime = Long.MIN_VALUE
     private var lastClickAt = Long.MIN_VALUE
+
+    // Ouverture maximale récente et instant où elle a été observée : référence de l'amplitude.
+    private var recentMax = Float.NEGATIVE_INFINITY
+    private var recentMaxAt = Long.MIN_VALUE
+
+    /** Amplitude et durée de la dernière fermeture mesurée, pour le diagnostic et le réglage. */
+    var lastAmplitude: Float = 0f
+        private set
+    var lastCloseDurationMs: Long = 0L
+        private set
 
     /** Position du curseur figée à l'instant où le pouce a commencé à se fermer. */
     var anchorX: Float = 0f
@@ -79,8 +99,8 @@ class ClickDetector(private val config: Config = Config()) {
     fun reset() {
         closed = false
         holding = false
-        lastRatio = Float.NaN
-        lastTime = Long.MIN_VALUE
+        recentMax = Float.NEGATIVE_INFINITY
+        recentMaxAt = Long.MIN_VALUE
         holdProgress = 0f
     }
 
@@ -90,28 +110,34 @@ class ClickDetector(private val config: Config = Config()) {
      * @param nowMs horloge monotone
      */
     fun update(pinchRatio: Float, cursorX: Float, cursorY: Float, nowMs: Long): Event {
-        val previousRatio = lastRatio
-        val previousTime = lastTime
-        lastRatio = pinchRatio
-        lastTime = nowMs
-
-        if (previousRatio.isNaN() || previousTime == Long.MIN_VALUE) return Event.NONE
-        val dt = ((nowMs - previousTime).coerceAtLeast(1L)).toFloat() / 1000f
-
-        // Vitesse de fermeture : positive quand le pouce se rapproche de l'index.
-        val closingSpeed = (previousRatio - pinchRatio) / dt
+        // L'ouverture maximale récente sert de point de départ à l'amplitude. Elle est oubliée
+        // après amplitudeWindowMs, sans quoi une main ouverte il y a plusieurs secondes
+        // justifierait encore une fermeture lente.
+        if (pinchRatio > recentMax || nowMs - recentMaxAt > config.amplitudeWindowMs) {
+            recentMax = pinchRatio
+            recentMaxAt = nowMs
+        }
 
         if (!closed) {
-            if (pinchRatio < config.closeRatio && closingSpeed >= config.minCloseSpeed) {
-                closed = true
-                closedAt = nowMs
-                holding = false
-                holdProgress = 0f
-                // Le curseur est figé ici : la validation portera sur la cible visée au moment
-                // où le geste a commencé, pas sur celle atteinte après une éventuelle dérive.
-                anchorX = cursorX
-                anchorY = cursorY
+            if (pinchRatio >= config.closeRatio) return Event.NONE
+
+            val amplitude = recentMax - pinchRatio
+            val duration = nowMs - recentMaxAt
+            if (amplitude < config.minAmplitude || duration > config.maxCloseMs) {
+                // Fermeture trop faible ou trop lente : repositionnement, pas intention de cliquer.
+                return Event.NONE
             }
+
+            closed = true
+            closedAt = nowMs
+            holding = false
+            holdProgress = 0f
+            lastAmplitude = amplitude
+            lastCloseDurationMs = duration
+            // Le curseur est figé ici : la validation portera sur la cible visée au moment où le
+            // geste a commencé, pas sur celle atteinte après une éventuelle dérive.
+            anchorX = cursorX
+            anchorY = cursorY
             return Event.NONE
         }
 
@@ -126,6 +152,8 @@ class ClickDetector(private val config: Config = Config()) {
         if (pinchRatio > config.openRatio) {
             closed = false
             holdProgress = 0f
+            recentMax = pinchRatio
+            recentMaxAt = nowMs
             if (holding) {
                 holding = false
                 return Event.HOLD_END
