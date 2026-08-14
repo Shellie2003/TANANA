@@ -5,8 +5,13 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.Rect
 import android.view.View
 import com.example.gesture.GestureType
+import com.example.input.RadialKeyboard
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * Curseur holographique dessiné par-dessus toutes les applications.
@@ -50,6 +55,24 @@ class CursorOverlayView(context: Context) : View(context) {
 
     private var rotation = 0f
 
+    /** État du clavier radial, ou null quand il est fermé. */
+    private var keyboard: RadialKeyboard.State? = null
+
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        textSize = 17f * density
+        isFakeBoldText = true
+    }
+    private val sectorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val dimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val textBounds = Rect()
+
+    /** Affiche ou masque le clavier radial. */
+    fun setKeyboard(state: RadialKeyboard.State?) {
+        keyboard = state
+        invalidate()
+    }
+
     /** Met à jour l'état affiché. Appelée depuis le thread principal. */
     fun update(
         x: Float,
@@ -82,6 +105,7 @@ class CursorOverlayView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        keyboard?.let { drawKeyboard(canvas, it) }
         if (!visible) return
 
         val cx = cursorX * width
@@ -116,6 +140,60 @@ class CursorOverlayView(context: Context) : View(context) {
             strengthPaint.color = withAlpha(COLOR_GOLD, 0.25f + 0.6f * pinchStrength)
             canvas.drawCircle(cx, cy, radius * (1.45f - 0.4f * pinchStrength), strengthPaint)
         }
+    }
+
+    /**
+     * Clavier radial : huit secteurs disposés en couronne autour du centre.
+     *
+     * Les libellés sont placés à distance fixe du centre, dans la direction de leur secteur. Rien
+     * n'est aligné sur une grille : la cible n'est pas la pastille dessinée mais la *direction*
+     * qu'elle indique, et le secteur s'étend donc jusqu'au bord de l'écran. C'est ce qui rend la
+     * sélection insensible à la précision du pointage.
+     */
+    private fun drawKeyboard(canvas: Canvas, state: RadialKeyboard.State) {
+        val cx = width / 2f
+        val cy = height / 2f
+        val radius = minOf(width, height) * 0.34f
+
+        // Voile sombre : le clavier doit dominer le contenu sous-jacent pour rester lisible.
+        dimPaint.color = withAlpha(0xFF040814.toInt(), 0.82f)
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+
+        // Zone morte centrale, où ramener la main sans rien sélectionner.
+        ringPaint.color = withAlpha(COLOR_CYAN, 0.35f)
+        canvas.drawCircle(cx, cy, radius * 0.34f, ringPaint)
+
+        for (sector in state.labels.indices) {
+            val angle = (sector + 0.5) * (2 * PI / RadialKeyboard.SECTORS)
+            val x = cx + (sin(angle) * radius).toFloat()
+            val y = cy - (cos(angle) * radius).toFloat()
+            val active = sector == state.hoveredSector
+
+            val bubble = 30f * density
+            sectorPaint.color = withAlpha(if (active) COLOR_GOLD else COLOR_CYAN, if (active) 0.28f else 0.10f)
+            canvas.drawCircle(x, y, bubble, sectorPaint)
+
+            if (active && state.progress > 0f) {
+                // Arc de progression : la validation est annoncée avant de partir.
+                strengthPaint.color = COLOR_GOLD
+                canvas.drawArc(
+                    x - bubble, y - bubble, x + bubble, y + bubble,
+                    -90f, 360f * state.progress, false, strengthPaint
+                )
+            }
+
+            val label = state.labels[sector]
+            labelPaint.color = if (active) COLOR_GOLD else 0xFFFFFFFF.toInt()
+            labelPaint.getTextBounds(label, 0, label.length, textBounds)
+            canvas.drawText(label, x, y + textBounds.height() / 2f, labelPaint)
+        }
+
+        // Rappel du niveau courant.
+        labelPaint.color = withAlpha(COLOR_CYAN, 0.75f)
+        canvas.drawText(
+            if (state.level == RadialKeyboard.Level.GROUP) "GROUPE" else "LETTRE",
+            cx, cy + 6f * density, labelPaint
+        )
     }
 
     private fun colorFor(gesture: GestureType): Int = when (gesture) {

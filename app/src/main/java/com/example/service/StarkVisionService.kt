@@ -41,6 +41,7 @@ import com.example.gesture.GestureType
 import com.example.gesture.HandGestureAnalyzer
 import com.example.gesture.HandGestureListener
 import com.example.gesture.HandGestureState
+import com.example.input.RadialKeyboard
 import com.example.ui.overlay.CursorOverlayView
 import java.util.concurrent.Executors
 
@@ -70,6 +71,8 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private var analyzer: HandGestureAnalyzer? = null
 
     private val policy = GesturePolicy()
+    private val keyboard = RadialKeyboard()
+    private var keyboardOpen = false
     private lateinit var bindingsStore: BindingsStore
 
     private var windowManager: WindowManager? = null
@@ -344,6 +347,14 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             visible = state.isHandDetected && state.gesture != GestureType.IDLE
         )
 
+        // Clavier ouvert : le curseur ne pilote plus le système mais la sélection des caractères.
+        // Court-circuiter la politique ici évite qu'un appui parte dans l'application sous-jacente
+        // pendant qu'on écrit.
+        if (keyboardOpen) {
+            handleKeyboard(state)
+            return
+        }
+
         val actions = policy.onGesture(
             gesture = state.gesture,
             cursorX = cursorX,
@@ -354,13 +365,48 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         )
 
         for (action in actions) {
-            // MoveCursor est purement visuelle : la traiter ici évite un aller-retour inutile
-            // vers le service d'accessibilité trente fois par seconde.
             if (action is SystemAction.MoveCursor) continue
+            if (action is SystemAction.ToggleKeyboard) {
+                toggleKeyboard()
+                continue
+            }
             if (!StarkAccessibilityService.perform(action, screenWidth, screenHeight)) {
                 Log.i(TAG, "Service d'accessibilité inactif : $action ignorée")
             }
         }
+    }
+
+    /**
+     * Sélection au clavier radial.
+     *
+     * Le poing sert de sortie : c'est la pose la plus éloignée du pointage, donc la moins
+     * susceptible d'être formée par accident en écrivant.
+     */
+    private fun handleKeyboard(state: HandGestureState) {
+        if (state.gesture == GestureType.FIST && state.isNewPose) {
+            toggleKeyboard()
+            return
+        }
+
+        val emission = keyboard.update(cursorX, cursorY, SystemClock.uptimeMillis())
+        overlayView?.setKeyboard(keyboard.state())
+
+        when {
+            emission.backspace ->
+                StarkAccessibilityService.perform(SystemAction.Backspace, screenWidth, screenHeight)
+            emission.text != null ->
+                StarkAccessibilityService.perform(
+                    SystemAction.TypeText(emission.text), screenWidth, screenHeight
+                )
+        }
+    }
+
+    private fun toggleKeyboard() {
+        keyboardOpen = !keyboardOpen
+        keyboard.reset()
+        policy.reset()
+        overlayView?.setKeyboard(if (keyboardOpen) keyboard.state() else null)
+        Log.i(TAG, if (keyboardOpen) "Clavier gestuel ouvert" else "Clavier gestuel fermé")
     }
 
     override fun onDestroy() {
