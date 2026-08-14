@@ -1,47 +1,71 @@
-# Règles R8 du Stark HUD Launcher.
+# Règles R8 de NEXUS.
 #
-# La minification est active en release. Les bibliothèques de vision par ordinateur reposent
-# massivement sur JNI et la réflexion : leurs symboles doivent être préservés, faute de quoi
-# l'application compile et s'installe mais échoue à charger le modèle à l'exécution.
+# Contexte : le moteur de vision fonctionnait en debug et échouait en release. Les deux variantes
+# ne diffèrent que par la minification, ce qui désigne sans ambiguïté une règle de conservation
+# manquante. Les bibliothèques de vision reposent massivement sur JNI, la réflexion et des classes
+# générées : R8 n'a aucun moyen de voir qu'elles sont utilisées, et les supprime ou les renomme.
 
-# --- MediaPipe Tasks ---
-# Les classes de tâches et les protos générés sont résolus par nom depuis le code natif.
--keep class com.google.mediapipe.** { *; }
--keep interface com.google.mediapipe.** { *; }
--keepclassmembers class com.google.mediapipe.** {
+# --- JNI ---------------------------------------------------------------------------------------
+# Règle canonique, et la plus probablement décisive ici. Le code natif retrouve ses méthodes par
+# nom *et par signature* : renommer une classe apparaissant dans les paramètres d'une méthode
+# native suffit à rendre la liaison introuvable, même si la méthode elle-même est conservée.
+# includedescriptorclasses étend donc la protection aux types des signatures.
+-keepclasseswithmembernames,includedescriptorclasses class * {
     native <methods>;
 }
+
+# --- MediaPipe Tasks ---------------------------------------------------------------------------
+-keep class com.google.mediapipe.** { *; }
+-keep interface com.google.mediapipe.** { *; }
 -dontwarn com.google.mediapipe.**
 
-# --- TensorFlow Lite (moteur d'inférence sous MediaPipe) ---
--keep class org.tensorflow.lite.** { *; }
--keep class org.tensorflow.lite.gpu.** { *; }
--dontwarn org.tensorflow.lite.**
+# --- TensorFlow Lite ---------------------------------------------------------------------------
+# Le moteur d'inférence sous MediaPipe, y compris ses delegates GPU chargés dynamiquement.
+-keep class org.tensorflow.** { *; }
+-keep interface org.tensorflow.** { *; }
+-dontwarn org.tensorflow.**
 
-# --- Protocol Buffers et AutoValue ---
-# Les options des tâches MediaPipe sont des classes AutoValue instanciées par réflexion.
--keep class com.google.protobuf.** { *; }
--keep class * extends com.google.protobuf.GeneratedMessageLite { *; }
--keepclassmembers class * extends com.google.auto.value.AutoValue { *; }
--dontwarn com.google.protobuf.**
+# --- AutoValue ---------------------------------------------------------------------------------
+# Les options des tâches MediaPipe (HandLandmarkerOptions, BaseOptions...) sont des classes
+# abstraites dont l'implémentation est générée sous le nom AutoValue_*. La règle précédente
+# visait « les classes étendant com.google.auto.value.AutoValue », ce qui ne correspondait à rien :
+# AutoValue est une annotation, pas une classe mère. Aucune classe générée n'était donc protégée.
+-keep class **.AutoValue_* { *; }
+-keep class com.google.auto.value.** { *; }
 -dontwarn com.google.auto.value.**
--dontwarn javax.lang.model.**
 
-# --- CameraX ---
+# --- Protocol Buffers --------------------------------------------------------------------------
+# Le fichier .task embarque ses métadonnées en protobuf. Protobuf Lite accède à ses champs par
+# réflexion : les supprimer casse la lecture du modèle sans erreur de compilation.
+-keep class com.google.protobuf.** { *; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
+    <fields>;
+}
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite$Builder {
+    <fields>;
+}
+-dontwarn com.google.protobuf.**
+
+# --- Dépendances transitives -------------------------------------------------------------------
+-keep class com.google.common.util.concurrent.** { *; }
+-dontwarn com.google.common.**
+-dontwarn javax.annotation.**
+-dontwarn javax.lang.model.**
 -dontwarn androidx.camera.**
 
-# --- Services ---
+# --- Services ----------------------------------------------------------------------------------
 # Instanciés par le système à partir des noms déclarés dans le manifeste.
 -keep class com.example.service.StarkAccessibilityService { *; }
 -keep class com.example.service.StarkVisionService { *; }
 
-# --- Modèle de données du moteur gestuel ---
-# Conservé pour que les traces de plantage restent lisibles sur le chemin critique.
+# --- Modèle de données du moteur gestuel -------------------------------------------------------
 -keep class com.example.gesture.HandGestureState { *; }
 -keep class com.example.gesture.Landmark { *; }
 
-# --- Diagnostic ---
-# Conserve les numéros de ligne dans les traces tout en masquant les noms de fichiers source.
+# --- Attributs ---------------------------------------------------------------------------------
+# Signature et les annotations d'exécution sont nécessaires à la réflexion de protobuf et
+# d'AutoValue ; les numéros de ligne rendent les traces exploitables via mapping-r8.txt.
+-keepattributes Signature,InnerClasses,EnclosingMethod
+-keepattributes *Annotation*,RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
--keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod

@@ -143,6 +143,32 @@ jobs:
               print(f"  {lib}")
           PY
 
+          # Vérification anti-régression de la minification.
+          #
+          # Le moteur de vision a fonctionné en debug et échoué en release pendant plusieurs
+          # itérations : les deux variantes ne diffèrent que par R8, qui supprimait ou renommait
+          # des classes que seul le code natif référence. Rien ne le signale à la compilation.
+          # On compare donc ce que chaque variante conserve réellement.
+          echo "## Classes critiques conservées par R8"
+          missing=0
+          for symbol in \
+            "com/google/mediapipe/tasks/vision/handlandmarker/HandLandmarker" \
+            "AutoValue_HandLandmarker" \
+            "com/google/mediapipe/tasks/core/BaseOptions" \
+            "org/tensorflow/lite"
+          do
+            if unzip -p "$RELEASE_APK" 'classes*.dex' | grep -aqF "$symbol"; then
+              echo "  présent : $symbol"
+            else
+              echo "::error::$symbol absent de l'APK minifiée : R8 l'a supprimé ou renommé."
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::$missing symbole(s) critique(s) manquant(s). Le moteur de vision échouera en release."
+            exit 1
+          fi
+
           echo "## Alignement des segments ELF (16 Ko requis sur Android 15+)"
           work=$(mktemp -d)
           unzip -q -o "$RELEASE_APK" 'lib/*' -d "$work" || true
