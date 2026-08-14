@@ -61,10 +61,22 @@ android {
   buildTypes {
     release {
       isCrunchPngs = true
-      // R8 en mode complet : suppression du code et des ressources inutilisés. Les règles de
-      // conservation nécessaires à MediaPipe et TensorFlow Lite sont dans proguard-rules.pro.
-      isMinifyEnabled = true
-      isShrinkResources = true
+
+      // Minification désactivée, délibérément.
+      //
+      // Le moteur de vision fonctionnait en debug et échouait en release sur appareil. Les deux
+      // variantes ne diffèrent que par R8 : la cause était donc une classe supprimée ou renommée
+      // par la minification. Trois séries de règles de conservation successives n'ont pas suffi à
+      // l'identifier — MediaPipe résout une part de ses classes depuis du code natif, où aucune
+      // analyse statique ne peut suivre la référence.
+      //
+      // Le compromis est tranché en faveur du fonctionnement : la minification faisait gagner
+      // une vingtaine de mégaoctets et une obfuscation dont cette application n'a aucun besoin,
+      // contre un moteur de vision inutilisable. Les règles restent dans proguard-rules.pro pour
+      // qui voudrait la réactiver, et la vérification d'empaquetage en intégration continue
+      // détectera immédiatement une régression si c'était le cas.
+      isMinifyEnabled = false
+      isShrinkResources = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
 
       // Ordre de préférence pour la signature :
