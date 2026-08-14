@@ -9,13 +9,21 @@ package com.example.control
  */
 sealed interface SystemAction {
 
+    // --- Pointage ---------------------------------------------------------------------------
+
     /** Déplacement du curseur, en coordonnées écran normalisées 0..1. */
     data class MoveCursor(val x: Float, val y: Float) : SystemAction
 
-    /** Appui bref à la position indiquée. */
+    /** Appui bref. */
     data class Tap(val x: Float, val y: Float) : SystemAction
 
-    /** Début d'un glisser : le pincement est maintenu. */
+    /** Appui long : ouvre les menus contextuels, sélectionne du texte. */
+    data class LongPress(val x: Float, val y: Float) : SystemAction
+
+    /** Double appui : zoom dans les cartes et les images. */
+    data class DoubleTap(val x: Float, val y: Float) : SystemAction
+
+    /** Début d'un glisser : signalé à la superposition, pas au système. */
     data class DragStart(val x: Float, val y: Float) : SystemAction
 
     /** Poursuite du glisser. */
@@ -32,25 +40,59 @@ sealed interface SystemAction {
         val toY: Float
     ) : SystemAction
 
+    // --- Défilement -------------------------------------------------------------------------
+
     /**
-     * Défilement vertical. [amount] est exprimé en fraction de hauteur d'écran ;
-     * positif = le contenu descend (la main monte).
+     * Défilement vertical. [amount] est une fraction de hauteur d'écran ;
+     * positif = le contenu descend.
      */
     data class Scroll(val amount: Float) : SystemAction
 
-    /** Retour système. */
+    /** Défilement horizontal, pour les carrousels et les onglets. */
+    data class ScrollHorizontal(val amount: Float) : SystemAction
+
+    // --- Navigation -------------------------------------------------------------------------
+
     data object Back : SystemAction
-
-    /** Écran d'accueil. */
     data object Home : SystemAction
-
-    /** Ouverture du sélecteur d'applications récentes. */
     data object Recents : SystemAction
-
-    /** Lecture / pause du média en cours. */
-    data object PlayPause : SystemAction
-
-    /** Commutation vers l'application suivante ou précédente. */
     data object SwitchNext : SystemAction
     data object SwitchPrevious : SystemAction
+
+    /** Volet des notifications. */
+    data object Notifications : SystemAction
+
+    /**
+     * Réglages rapides : c'est de là que se basculent données mobiles, Wi-Fi, lampe, mode avion.
+     * Sans cette action, une part importante du téléphone restait hors d'atteinte.
+     */
+    data object QuickSettings : SystemAction
+
+    data object Screenshot : SystemAction
+    data object LockScreen : SystemAction
+    data object SplitScreen : SystemAction
+    data object PowerDialog : SystemAction
+
+    // --- Média et volume --------------------------------------------------------------------
+
+    data object PlayPause : SystemAction
+    data object MediaNext : SystemAction
+    data object MediaPrevious : SystemAction
+    data object VolumeUp : SystemAction
+    data object VolumeDown : SystemAction
+    data object VolumeMute : SystemAction
+
+    // --- Saisie de texte --------------------------------------------------------------------
+
+    /** Ouvre ou ferme le clavier gestuel. */
+    data object ToggleKeyboard : SystemAction
+
+    /** Insère un caractère dans le champ de saisie actif. */
+    data class TypeText(val text: String) : SystemAction
+
+    /** Efface le caractère précédent. */
+    data object Backspace : SystemAction
+
+    /** Aucune action : sert à désactiver explicitement un geste dans la personnalisation. */
+    data object None : SystemAction
 }

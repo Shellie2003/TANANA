@@ -21,6 +21,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import com.example.control.BindableAction
+import com.example.control.BindingsStore
+import com.example.control.GestureBindings
 import com.example.gesture.GestureType
 import com.example.power.PowerMode
 import com.example.service.StarkAccessibilityService
@@ -53,6 +56,8 @@ class MainActivity : ComponentActivity() {
         EngineStatus(false, GestureType.IDLE, 0f, 0, 0, null)
     )
     private var apps by mutableStateOf<List<LauncherAppItem>>(emptyList())
+    private lateinit var bindingsStore: BindingsStore
+    private var bindings by mutableStateOf(GestureBindings())
 
     private val requestCamera = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -65,6 +70,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        bindingsStore = BindingsStore(this)
+        bindings = bindingsStore.load()
         refreshPermissions()
 
         setContent {
@@ -97,8 +104,10 @@ class MainActivity : ComponentActivity() {
                         status = status,
                         setupSteps = buildSetupSteps(),
                         apps = apps,
+                        bindings = bindings,
                         onToggleEngine = ::toggleEngine,
-                        onLaunchApp = ::launchApp
+                        onLaunchApp = ::launchApp,
+                        onRebind = ::rebind
                     )
                 }
             }
@@ -198,6 +207,18 @@ class MainActivity : ComponentActivity() {
             }
         )
     )
+
+    /**
+     * Enregistre une nouvelle association et la transmet au service.
+     *
+     * Le service relit sa configuration à chaque démarrage ; on le relance donc s'il tourne, pour
+     * que le changement prenne effet immédiatement plutôt qu'au prochain lancement.
+     */
+    private fun rebind(gesture: GestureType, action: BindableAction) {
+        bindings = bindings.with(gesture, action)
+        bindingsStore.save(bindings)
+        if (StarkVisionService.isRunning) StarkVisionService.start(this)
+    }
 
     private fun toggleEngine(enabled: Boolean) {
         if (enabled) StarkVisionService.start(this) else StarkVisionService.stop(this)

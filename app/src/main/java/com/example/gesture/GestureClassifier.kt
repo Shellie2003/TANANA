@@ -59,11 +59,12 @@ data class GestureConfig(
     // Pincement : deux seuils formant un trigger de Schmitt.
     val pinchEnterRatio: Float = 0.34f,
     val pinchExitRatio: Float = 0.48f,
-    // Un doigt est considéré tendu au-dessus de ce seuil, replié en dessous de l'autre.
-    // L'écart entre les deux empêche un doigt à mi-course de faire osciller la pose.
-    val fingerExtendedThreshold: Float = 0.62f,
-    val fingerFoldedThreshold: Float = 0.42f,
-    val thumbExtendedThreshold: Float = 0.55f,
+    /**
+     * Le pincement exige désormais que l'index soit tendu. Sans cette condition, le pouce au
+     * repos près de l'index — position naturelle du pointage — était classé comme un pincement :
+     * c'était la principale source de clics involontaires.
+     */
+    val pinchRequiresExtendedIndex: Float = 0.55f,
     // Nombre de frames consécutives requises pour valider un changement de pose.
     val framesToLatch: Int = 3,
     // Balayage.
@@ -96,9 +97,15 @@ data class GestureConfig(
  */
 class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
 
+    private val scorer = PoseScorer()
+
     private var latchedPose = GestureType.IDLE
     private var candidatePose = GestureType.IDLE
     private var candidateFrames = 0
+
+    /** Netteté du geste courant : écart entre la meilleure et la deuxième hypothèse. */
+    var poseMargin: Float = 0f
+        private set
 
     private var pinchActive = false
 
@@ -209,63 +216,29 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
     }
 
     /**
-     * Détermine la pose brute d'une frame, sans mémoire autre que l'hystérésis du pincement.
+     * Détermine la pose brute d'une frame.
      *
-     * L'ordre des tests encode les priorités : le pincement l'emporte sur tout, car c'est le seul
-     * geste d'action directe ; le poing vient ensuite, car il est géométriquement le plus éloigné
-     * des autres ; les poses à doigts comptés se départagent enfin.
+     * Le pincement est traité à part : il ne se distingue pas par un décompte de doigts mais par
+     * la distance pouce-index, une dimension orthogonale aux autres poses. Il exige en outre que
+     * l'index soit tendu — sans quoi le pouce naturellement posé près de l'index pendant le
+     * pointage déclenchait des clics fantômes.
+     *
+     * Les autres poses sont départagées par score avec marge de rejet : une main ambiguë conserve
+     * la pose courante au lieu d'en inventer une.
      */
     private fun classifyPose(m: HandMetrics): GestureType {
-        // Pincement : seuil d'entrée strict, seuil de sortie plus large.
+        poseMargin = scorer.margin(m)
+
         val pinchThreshold = if (pinchActive) config.pinchExitRatio else config.pinchEnterRatio
-        if (m.pinchRatio < pinchThreshold) return GestureType.PINCH
-
-        val index = m.fingerExtension[0]
-        val middle = m.fingerExtension[1]
-        val ring = m.fingerExtension[2]
-        val pinky = m.fingerExtension[3]
-        val thumb = m.thumbExtension
-
-        val extended = { v: Float -> v > config.fingerExtendedThreshold }
-        val folded = { v: Float -> v < config.fingerFoldedThreshold }
-
-        // Poing : les quatre doigts repliés et le pouce rabattu sur la paume.
-        if (folded(index) && folded(middle) && folded(ring) && folded(pinky) &&
-            thumb < config.thumbExtendedThreshold
+        if (m.pinchRatio < pinchThreshold &&
+            m.fingerExtension[0] > config.pinchRequiresExtendedIndex
         ) {
-            return GestureType.FIST
+            return GestureType.PINCH
         }
 
-        // Pouce levé : le pouce seul sort d'un poing.
-        if (folded(index) && folded(middle) && folded(ring) && folded(pinky) &&
-            thumb >= config.thumbExtendedThreshold
-        ) {
-            return GestureType.THUMB_UP
-        }
-
-        // Main ouverte : au moins quatre doigts longs tendus.
-        if (extended(index) && extended(middle) && extended(ring) && extended(pinky)) {
-            return GestureType.OPEN_PALM
-        }
-
-        // Trois doigts : index, majeur, annulaire tendus, auriculaire replié.
-        if (extended(index) && extended(middle) && extended(ring) && folded(pinky)) {
-            return GestureType.THREE_FINGER
-        }
-
-        // Deux doigts : index et majeur tendus, annulaire et auriculaire repliés.
-        if (extended(index) && extended(middle) && folded(ring) && folded(pinky)) {
-            return GestureType.TWO_FINGER
-        }
-
-        // Index seul.
-        if (extended(index) && folded(middle) && folded(ring) && folded(pinky)) {
-            return GestureType.POINT
-        }
-
-        // Pose ambiguë : on conserve la pose courante plutôt que de retomber sur une valeur
-        // arbitraire, ce qui éviterait un clignotement pendant les transitions.
-        return latchedPose
+        // null = observation ambiguë. On conserve la pose courante : c'est précisément ce
+        // refus de trancher qui supprime les conflits entre signes voisins.
+        return scorer.classify(m) ?: latchedPose
     }
 
     private fun pushHistory(timestampMs: Long, x: Float, y: Float) {

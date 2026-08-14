@@ -34,6 +34,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.example.MainActivity
 import com.example.R
+import com.example.control.BindingsStore
 import com.example.control.GesturePolicy
 import com.example.control.SystemAction
 import com.example.gesture.GestureType
@@ -69,6 +70,7 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private var analyzer: HandGestureAnalyzer? = null
 
     private val policy = GesturePolicy()
+    private lateinit var bindingsStore: BindingsStore
 
     private var windowManager: WindowManager? = null
     private var overlayView: CursorOverlayView? = null
@@ -113,6 +115,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         readScreenMetrics()
 
+        bindingsStore = BindingsStore(this)
+        policy.updateBindings(bindingsStore.load())
+
         registerReceiver(
             powerReceiver,
             IntentFilter().apply {
@@ -141,6 +146,10 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
                 return START_NOT_STICKY
             }
         }
+
+        // Les associations peuvent avoir changé pendant que le service tournait : on les relit à
+        // chaque démarrage plutôt que de dépendre d'un redémarrage complet.
+        policy.updateBindings(bindingsStore.load())
 
         startInForeground()
         lifecycleRegistry.currentState = Lifecycle.State.STARTED

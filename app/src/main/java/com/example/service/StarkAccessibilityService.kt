@@ -7,7 +7,9 @@ import android.graphics.Path
 import android.media.AudioManager
 import android.util.Log
 import android.view.KeyEvent
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import com.example.control.SystemAction
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -23,6 +25,8 @@ import kotlin.math.hypot
  * aucune permission ne peut s'y substituer.
  */
 class StarkAccessibilityService : AccessibilityService() {
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Aucun traitement : le service n'est utilisé que pour émettre des actions.
@@ -52,27 +56,106 @@ class StarkAccessibilityService : AccessibilityService() {
     private fun execute(action: SystemAction, width: Float, height: Float) {
         when (action) {
             is SystemAction.Tap -> tap(action.x * width, action.y * height)
+            is SystemAction.LongPress -> longPress(action.x * width, action.y * height)
+            is SystemAction.DoubleTap -> {
+                tap(action.x * width, action.y * height)
+                mainHandler.postDelayed({ tap(action.x * width, action.y * height) }, DOUBLE_TAP_GAP_MS)
+            }
 
             is SystemAction.Drag -> drag(
                 action.fromX * width, action.fromY * height,
                 action.toX * width, action.toY * height
             )
 
-            is SystemAction.Scroll -> scroll(action.amount, width, height)
+            is SystemAction.Scroll -> scroll(action.amount, width, height, vertical = true)
+            is SystemAction.ScrollHorizontal -> scroll(action.amount, width, height, vertical = false)
 
             SystemAction.Back -> global(GLOBAL_ACTION_BACK)
             SystemAction.Home -> global(GLOBAL_ACTION_HOME)
             SystemAction.Recents -> global(GLOBAL_ACTION_RECENTS)
-            SystemAction.PlayPause -> mediaPlayPause()
+            SystemAction.Notifications -> global(GLOBAL_ACTION_NOTIFICATIONS)
+
+            // Les réglages rapides donnent accès aux données mobiles, au Wi-Fi et à la lampe :
+            // sans cette action, une part entière du téléphone restait hors d'atteinte.
+            SystemAction.QuickSettings -> global(GLOBAL_ACTION_QUICK_SETTINGS)
+
+            SystemAction.PowerDialog -> global(GLOBAL_ACTION_POWER_DIALOG)
+            SystemAction.SplitScreen -> global(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
+
+            SystemAction.Screenshot ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    global(GLOBAL_ACTION_TAKE_SCREENSHOT)
+                } else {
+                    Log.i(TAG, "Capture d'écran indisponible avant Android 11")
+                }
+
+            SystemAction.LockScreen ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    global(GLOBAL_ACTION_LOCK_SCREEN)
+                } else {
+                    Log.i(TAG, "Verrouillage indisponible avant Android 9")
+                }
+
+            SystemAction.PlayPause -> mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+            SystemAction.MediaNext -> mediaKey(KeyEvent.KEYCODE_MEDIA_NEXT)
+            SystemAction.MediaPrevious -> mediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+
+            SystemAction.VolumeUp -> adjustVolume(AudioManager.ADJUST_RAISE)
+            SystemAction.VolumeDown -> adjustVolume(AudioManager.ADJUST_LOWER)
+            SystemAction.VolumeMute -> adjustVolume(AudioManager.ADJUST_TOGGLE_MUTE)
+
+            is SystemAction.TypeText -> typeText(action.text)
+            SystemAction.Backspace -> backspace()
 
             SystemAction.SwitchNext -> quickSwitch(forward = true, width = width, height = height)
             SystemAction.SwitchPrevious -> quickSwitch(forward = false, width = width, height = height)
 
-            // Purement visuelles : consommées par la superposition, pas par le système.
+            // Purement visuelles ou traitées ailleurs.
             is SystemAction.MoveCursor,
             is SystemAction.DragStart,
-            is SystemAction.DragMove -> Unit
+            is SystemAction.DragMove,
+            SystemAction.ToggleKeyboard,
+            SystemAction.None -> Unit
         }
+    }
+
+    // --- Saisie de texte ---------------------------------------------------------------------
+
+    /**
+     * Trouve le champ de saisie actif et y insère du texte.
+     *
+     * `ACTION_SET_TEXT` remplace intégralement le contenu : on relit donc l'existant et on
+     * réécrit la concaténation. C'est la seule voie disponible sans écrire un clavier système
+     * complet, et elle suppose de pouvoir lire le contenu de la fenêtre.
+     */
+    private fun typeText(text: String) {
+        val node = findFocusedEditable() ?: run {
+            Log.i(TAG, "Aucun champ de saisie actif")
+            return
+        }
+        val current = node.text?.toString() ?: ""
+        setText(node, current + text)
+        node.recycle()
+    }
+
+    private fun backspace() {
+        val node = findFocusedEditable() ?: return
+        val current = node.text?.toString() ?: ""
+        if (current.isNotEmpty()) setText(node, current.dropLast(1))
+        node.recycle()
+    }
+
+    private fun setText(node: AccessibilityNodeInfo, value: String) {
+        val arguments = android.os.Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+        }
+        runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments) }
+            .onFailure { Log.w(TAG, "Écriture refusée", it) }
+    }
+
+    private fun findFocusedEditable(): AccessibilityNodeInfo? {
+        val focused = runCatching { findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull()
+        return if (focused?.isEditable == true) focused else null
     }
 
     private fun global(action: Int) {
@@ -83,6 +166,32 @@ class StarkAccessibilityService : AccessibilityService() {
     private fun tap(x: Float, y: Float) {
         val path = Path().apply { moveTo(x, y) }
         dispatch(path, durationMs = TAP_DURATION_MS)
+    }
+
+    /** L'appui long se distingue du bref par la seule durée du contact. */
+    private fun longPress(x: Float, y: Float) {
+        val path = Path().apply { moveTo(x, y) }
+        dispatch(path, durationMs = LONG_PRESS_MS)
+    }
+
+    private fun mediaKey(keyCode: Int) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        val now = android.os.SystemClock.uptimeMillis()
+        runCatching {
+            audioManager.dispatchMediaKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0))
+        }.onFailure { Log.w(TAG, "Commande média refusée", it) }
+    }
+
+    private fun adjustVolume(direction: Int) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        runCatching {
+            audioManager.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                direction,
+                AudioManager.FLAG_SHOW_UI
+            )
+        }.onFailure { Log.w(TAG, "Réglage du volume refusé", it) }
     }
 
     private fun drag(fromX: Float, fromY: Float, toX: Float, toY: Float) {
@@ -103,19 +212,24 @@ class StarkAccessibilityService : AccessibilityService() {
      * [amount] est une fraction de hauteur d'écran ; positif fait descendre le contenu, donc
      * correspond à un glisser du haut vers le bas.
      */
-    private fun scroll(amount: Float, width: Float, height: Float) {
+    private fun scroll(amount: Float, width: Float, height: Float, vertical: Boolean) {
         if (abs(amount) < 1e-3f) return
 
-        val travel = (amount * height).coerceIn(-height * 0.6f, height * 0.6f)
-        val centerX = width / 2f
-        // Le trajet est centré verticalement pour rester dans la zone défilable quelle que soit
-        // la mise en page, et ne jamais empiéter sur les zones de gestes système des bords.
-        val startY = (height / 2f - travel / 2f).coerceIn(height * 0.2f, height * 0.8f)
-        val endY = (startY + travel).coerceIn(height * 0.15f, height * 0.85f)
+        val span = if (vertical) height else width
+        val travel = (amount * span).coerceIn(-span * 0.6f, span * 0.6f)
 
+        // Le trajet est centré pour rester dans la zone défilable quelle que soit la mise en page,
+        // et ne jamais empiéter sur les zones de gestes système des bords.
         val path = Path().apply {
-            moveTo(centerX, startY)
-            lineTo(centerX, endY)
+            if (vertical) {
+                val startY = (height / 2f - travel / 2f).coerceIn(height * 0.2f, height * 0.8f)
+                moveTo(width / 2f, startY)
+                lineTo(width / 2f, (startY + travel).coerceIn(height * 0.15f, height * 0.85f))
+            } else {
+                val startX = (width / 2f - travel / 2f).coerceIn(width * 0.2f, width * 0.8f)
+                moveTo(startX, height / 2f)
+                lineTo((startX + travel).coerceIn(width * 0.15f, width * 0.85f), height / 2f)
+            }
         }
         dispatch(path, SCROLL_DURATION_MS)
     }
@@ -141,20 +255,6 @@ class StarkAccessibilityService : AccessibilityService() {
         if (!dispatched) global(GLOBAL_ACTION_RECENTS)
     }
 
-    private fun mediaPlayPause() {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        // Deux évènements sont nécessaires : les lecteurs réagissent au relâchement de la touche.
-        val now = android.os.SystemClock.uptimeMillis()
-        runCatching {
-            audioManager.dispatchMediaKeyEvent(
-                KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, 0)
-            )
-            audioManager.dispatchMediaKeyEvent(
-                KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, 0)
-            )
-        }.onFailure { Log.w(TAG, "Commande média refusée", it) }
-    }
-
     private fun dispatch(path: Path, durationMs: Long): Boolean {
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
@@ -167,6 +267,8 @@ class StarkAccessibilityService : AccessibilityService() {
         private const val TAG = "StarkA11yService"
 
         private const val TAP_DURATION_MS = 60L
+        private const val LONG_PRESS_MS = 700L
+        private const val DOUBLE_TAP_GAP_MS = 120L
         private const val MIN_DRAG_MS = 120L
         private const val MAX_DRAG_MS = 600L
         private const val SCROLL_DURATION_MS = 180L

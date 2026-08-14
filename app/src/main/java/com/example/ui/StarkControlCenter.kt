@@ -45,6 +45,10 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,6 +63,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
+import com.example.control.BindableAction
+import com.example.control.GestureBindings
 import com.example.gesture.GestureType
 import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
@@ -115,8 +121,10 @@ fun StarkControlCenter(
     status: EngineStatus,
     setupSteps: List<SetupStep>,
     apps: List<LauncherAppItem>,
+    bindings: GestureBindings,
     onToggleEngine: (Boolean) -> Unit,
     onLaunchApp: (String) -> Unit,
+    onRebind: (GestureType, BindableAction) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val pendingSteps = setupSteps.filterNot { it.isDone }
@@ -147,8 +155,19 @@ fun StarkControlCenter(
             )
         }
 
-        item { SectionTitle("Gestes", "Fonctionnent partout, y compris hors de cette application") }
-        item { GestureLegend(activeGesture = status.gesture) }
+        item {
+            SectionTitle(
+                "Gestes",
+                "Fonctionnent partout. Touchez une ligne pour changer son action."
+            )
+        }
+        item {
+            GestureLegend(
+                activeGesture = status.gesture,
+                bindings = bindings,
+                onRebind = onRebind
+            )
+        }
 
         if (apps.isNotEmpty()) {
             item { SectionTitle("Applications", "${apps.size} installées") }
@@ -409,63 +428,129 @@ private data class GestureDoc(
     val gesture: GestureType,
     val icon: ImageVector,
     val name: String,
-    val action: String,
     val color: Color
 )
 
 private val GESTURE_DOCS = listOf(
-    GestureDoc(GestureType.POINT, Icons.Default.TouchApp, "Index seul", "Déplace le curseur", StarkCyan),
-    GestureDoc(GestureType.PINCH, Icons.Default.CheckCircle, "Pouce + index", "Clic, ou glisser si maintenu", StarkGold),
-    GestureDoc(GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur", "Défilement vertical", StarkBlue),
-    GestureDoc(GestureType.THREE_FINGER, Icons.Default.SwapHoriz, "Trois doigts", "Applications récentes ; balayez pour naviguer", StarkBlue),
-    GestureDoc(GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte", "Lecture / pause du média", StarkCyan),
-    GestureDoc(GestureType.FIST, Icons.Default.ArrowBack, "Poing", "Retour", StarkRed),
-    GestureDoc(GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé", "Accueil", StarkRed)
+    GestureDoc(GestureType.POINT, Icons.Default.TouchApp, "Index seul", StarkCyan),
+    GestureDoc(GestureType.PINCH, Icons.Default.CheckCircle, "Pouce + index", StarkGold),
+    GestureDoc(GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur", StarkBlue),
+    GestureDoc(GestureType.THREE_FINGER, Icons.Default.SwapHoriz, "Trois doigts", StarkBlue),
+    GestureDoc(GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte", StarkCyan),
+    GestureDoc(GestureType.FIST, Icons.Default.ArrowBack, "Poing", StarkRed),
+    GestureDoc(GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé", StarkRed)
 )
 
 /**
- * Aide-mémoire des gestes. La ligne correspondant au geste en cours s'illumine : l'utilisateur
- * apprend le vocabulaire en le pratiquant, sans avoir à mémoriser un tableau.
+ * Aide-mémoire des gestes, doublé de l'écran de personnalisation.
+ *
+ * Les deux sont confondus à dessein : la liste qui apprend le vocabulaire est celle qui permet de
+ * le modifier. Séparer « aide » et « réglages » obligerait à mémoriser la correspondance avant de
+ * pouvoir la changer.
+ *
+ * La ligne du geste en cours s'illumine, ce qui donne un retour immédiat pendant l'apprentissage.
  */
 @Composable
-private fun GestureLegend(activeGesture: GestureType) {
+private fun GestureLegend(
+    activeGesture: GestureType,
+    bindings: GestureBindings,
+    onRebind: (GestureType, BindableAction) -> Unit
+) {
+    var editing by remember { mutableStateOf<GestureType?>(null) }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (doc in GESTURE_DOCS) {
             val isActive = doc.gesture == activeGesture
-            Row(
+            val bound = bindings[doc.gesture]
+
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
                     .background(
-                        if (isActive) doc.color.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.04f),
-                        RoundedCornerShape(14.dp)
+                        if (isActive) doc.color.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.04f)
                     )
                     .border(
                         1.dp,
                         if (isActive) doc.color else Color.Transparent,
                         RoundedCornerShape(14.dp)
                     )
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                    .clickable {
+                        editing = if (editing == doc.gesture) null else doc.gesture
+                    }
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(doc.icon, null, tint = doc.color, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = doc.name,
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
+                        )
+                        Text(
+                            text = bound.label,
+                            color = doc.color.copy(alpha = 0.9f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.UnfoldMore,
+                        contentDescription = "Changer l'action",
+                        tint = Color.White.copy(alpha = 0.35f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                if (editing == doc.gesture) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = bound.description,
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    ActionPicker(
+                        current = bound,
+                        onPick = {
+                            onRebind(doc.gesture, it)
+                            editing = null
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Liste des actions assignables. */
+@Composable
+private fun ActionPicker(current: BindableAction, onPick: (BindableAction) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (action in BindableAction.entries) {
+            val selected = action == current
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (selected) StarkCyan.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.03f)
+                    )
+                    .clickable { onPick(action) }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = doc.icon,
-                    contentDescription = null,
-                    tint = doc.color,
-                    modifier = Modifier.size(22.dp)
+                Text(
+                    text = action.label,
+                    color = if (selected) StarkCyan else Color.White.copy(alpha = 0.85f),
+                    fontSize = 13.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    modifier = Modifier.weight(1f)
                 )
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = doc.name,
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
-                    )
-                    Text(
-                        text = doc.action,
-                        color = Color.White.copy(alpha = 0.55f),
-                        fontSize = 12.sp
-                    )
+                if (selected) {
+                    Icon(Icons.Default.CheckCircle, null, tint = StarkCyan, modifier = Modifier.size(16.dp))
                 }
             }
         }

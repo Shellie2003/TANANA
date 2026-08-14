@@ -2,14 +2,15 @@
 <!--
   canPerformGestures est indispensable : sans lui, dispatchGesture est refusé et le service ne
   peut qu'exécuter les actions globales. Le service ne s'abonne à aucun évènement et ne lit pas
-  le contenu des fenêtres : il émet, il n'observe pas.
+  Le contenu des fenêtres est lu uniquement pour localiser le champ de saisie actif, ce
+  qu'exige l'écriture de texte sans clavier système. Aucun contenu n'est conservé ni transmis.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:canPerformGestures="true"
-    android:canRetrieveWindowContent="false"
+    android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="100"
     android:summary="@string/accessibility_service_label" />
