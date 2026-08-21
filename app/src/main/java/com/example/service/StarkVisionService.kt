@@ -119,7 +119,7 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         readScreenMetrics()
 
         bindingsStore = BindingsStore(this)
-        policy.updateBindings(bindingsStore.load())
+        applyPreferences()
 
         registerReceiver(
             powerReceiver,
@@ -150,9 +150,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             }
         }
 
-        // Les associations peuvent avoir changé pendant que le service tournait : on les relit à
+        // Les préférences peuvent avoir changé pendant que le service tournait : on les relit à
         // chaque démarrage plutôt que de dépendre d'un redémarrage complet.
-        policy.updateBindings(bindingsStore.load())
+        applyPreferences()
 
         startInForeground()
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
@@ -321,6 +321,12 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
                 stopSelf()
             }
         }, { command -> mainHandler.post(command) })
+    }
+
+    /** Relit les préférences et les applique à la politique de commande. */
+    private fun applyPreferences() {
+        policy.updateBindings(bindingsStore.load())
+        policy.updateClickTuning(bindingsStore.loadClickTuning())
     }
 
     // --- Réception des gestes ------------------------------------------------------------------

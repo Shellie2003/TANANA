@@ -20,12 +20,19 @@ class BindingsStore(context: Context) {
         prefs.edit().putString(KEY_BINDINGS, bindings.serialize()).apply()
     }
 
+    fun loadClickTuning(): ClickTuning = ClickTuning.fromId(prefs.getString(KEY_CLICK_TUNING, null))
+
+    fun saveClickTuning(tuning: ClickTuning) {
+        prefs.edit().putString(KEY_CLICK_TUNING, tuning.id).apply()
+    }
+
     fun reset() {
-        prefs.edit().remove(KEY_BINDINGS).apply()
+        prefs.edit().remove(KEY_BINDINGS).remove(KEY_CLICK_TUNING).apply()
     }
 
     private companion object {
         const val PREFS_NAME = "nexus_bindings"
         const val KEY_BINDINGS = "gesture_bindings"
+        const val KEY_CLICK_TUNING = "click_tuning"
     }
 }

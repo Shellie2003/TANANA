@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.example.control.BindableAction
 import com.example.control.BindingsStore
+import com.example.control.ClickTuning
 import com.example.control.GestureBindings
 import com.example.gesture.GestureType
 import com.example.power.PowerMode
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
     private var apps by mutableStateOf<List<LauncherAppItem>>(emptyList())
     private lateinit var bindingsStore: BindingsStore
     private var bindings by mutableStateOf(GestureBindings())
+    private var clickTuning by mutableStateOf(ClickTuning.DEFAULT)
 
     private val requestCamera = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -72,6 +74,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         bindingsStore = BindingsStore(this)
         bindings = bindingsStore.load()
+        clickTuning = bindingsStore.loadClickTuning()
         refreshPermissions()
 
         setContent {
@@ -106,7 +109,9 @@ class MainActivity : ComponentActivity() {
                         setupSteps = buildSetupSteps(),
                         apps = apps,
                         bindings = bindings,
+                        clickTuning = clickTuning,
                         onToggleEngine = ::toggleEngine,
+                        onClickTuningChange = ::setClickTuning,
                         onLaunchApp = ::launchApp,
                         onRebind = ::rebind
                     )
@@ -218,6 +223,19 @@ class MainActivity : ComponentActivity() {
     private fun rebind(gesture: GestureType, action: BindableAction) {
         bindings = bindings.with(gesture, action)
         bindingsStore.save(bindings)
+        if (StarkVisionService.isRunning) StarkVisionService.start(this)
+    }
+
+    /**
+     * Enregistre la fermeté du clic et l'applique immédiatement.
+     *
+     * Comme pour les associations, le service relit ses préférences à chaque démarrage : le
+     * relancer est ce qui rend le changement perceptible tout de suite, au moment même où
+     * l'utilisateur va l'essayer.
+     */
+    private fun setClickTuning(tuning: ClickTuning) {
+        clickTuning = tuning
+        bindingsStore.saveClickTuning(tuning)
         if (StarkVisionService.isRunning) StarkVisionService.start(this)
     }
 

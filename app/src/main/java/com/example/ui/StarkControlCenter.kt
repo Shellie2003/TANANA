@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
 import com.example.control.BindableAction
+import com.example.control.ClickTuning
 import com.example.control.GestureBindings
 import com.example.control.GesturePolicy
 import com.example.gesture.ClickDetector
@@ -129,7 +130,9 @@ fun StarkControlCenter(
     setupSteps: List<SetupStep>,
     apps: List<LauncherAppItem>,
     bindings: GestureBindings,
+    clickTuning: ClickTuning,
     onToggleEngine: (Boolean) -> Unit,
+    onClickTuningChange: (ClickTuning) -> Unit,
     onLaunchApp: (String) -> Unit,
     onRebind: (GestureType, BindableAction) -> Unit,
     modifier: Modifier = Modifier
@@ -166,7 +169,7 @@ fun StarkControlCenter(
         // dont l'échec soit silencieux, et donc celui dont l'utilisateur a besoin d'un retour.
         if (status.isRunning) {
             item { SectionTitle("Clic", "Pouce contre index, d'un contact bref") }
-            item { ClickCard(status.click) }
+            item { ClickCard(status.click, clickTuning, onClickTuningChange) }
         }
 
         item {
@@ -461,7 +464,11 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
  * temps réel, la part de gestes aboutis, et la cause nommée du dernier échec.
  */
 @Composable
-private fun ClickCard(click: GesturePolicy.ClickTelemetry) {
+private fun ClickCard(
+    click: GesturePolicy.ClickTelemetry,
+    tuning: ClickTuning,
+    onTuningChange: (ClickTuning) -> Unit
+) {
     val rate = click.successRate
 
     Column(
@@ -476,51 +483,93 @@ private fun ClickCard(click: GesturePolicy.ClickTelemetry) {
             Text(
                 text = "Calibration en cours — gardez la main dans le champ quelques secondes.",
                 color = StarkGold.copy(alpha = 0.9f),
-                fontSize = 12.sp
+                fontSize = 12.sp,
+                lineHeight = 16.sp
             )
-            return@Column
-        }
-
-        // Jauge de progression : la même grandeur que celle qui déclenche l'appui. Ce que
-        // l'utilisateur voit se remplir ici est littéralement ce qui décide sur l'appareil.
-        Text("Approche du contact", color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
-        Spacer(Modifier.height(6.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(8.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color.White.copy(alpha = 0.08f))
-        ) {
+        } else {
+            // Jauge de progression : la même grandeur que celle qui déclenche l'appui. Ce que
+            // l'utilisateur voit se remplir ici est littéralement ce qui décide sur l'appareil.
+            Text("Approche du contact", color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+            Spacer(Modifier.height(6.dp))
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(click.progress.coerceIn(0f, 1f))
+                    .fillMaxWidth()
                     .height(8.dp)
-                    .background(StarkGold)
-            )
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.White.copy(alpha = 0.08f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(click.progress.coerceIn(0f, 1f))
+                        .height(8.dp)
+                        .background(StarkGold)
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Metric("Clics", "${click.clicks}", Modifier.weight(1f))
+                Metric(
+                    "Réussite",
+                    rate?.let { "${(it * 100).toInt()} %" } ?: "—",
+                    Modifier.weight(1f)
+                )
+                Metric("Course", "%.2f".format(click.baseline), Modifier.weight(1f))
+            }
+
+            val advice = adviceFor(click)
+            if (advice != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = advice,
+                    color = StarkGold.copy(alpha = 0.85f),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            }
         }
 
+        // Le réglage reste accessible pendant la calibration : « Souple » est précisément ce dont
+        // a besoin quelqu'un dont les clics ne partent pas, et donc dont la main est mal suivie.
         Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Metric("Clics", "${click.clicks}", Modifier.weight(1f))
-            Metric(
-                "Réussite",
-                rate?.let { "${(it * 100).toInt()} %" } ?: "—",
-                Modifier.weight(1f)
-            )
-            Metric("Course", "%.2f".format(click.baseline), Modifier.weight(1f))
+        Text("Fermeté du geste", color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (option in ClickTuning.entries) {
+                val selected = option == tuning
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (selected) StarkGold.copy(alpha = 0.22f)
+                            else Color.White.copy(alpha = 0.04f)
+                        )
+                        .border(
+                            1.dp,
+                            if (selected) StarkGold else Color.Transparent,
+                            RoundedCornerShape(10.dp)
+                        )
+                        .clickable { onTuningChange(option) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = option.label,
+                        color = if (selected) StarkGold else Color.White.copy(alpha = 0.75f),
+                        fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
         }
-
-        val advice = adviceFor(click)
-        if (advice != null) {
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = advice,
-                color = StarkGold.copy(alpha = 0.85f),
-                fontSize = 11.sp,
-                lineHeight = 15.sp
-            )
-        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = tuning.description,
+            color = Color.White.copy(alpha = 0.45f),
+            fontSize = 10.sp,
+            lineHeight = 14.sp
+        )
     }
 }
 

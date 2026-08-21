@@ -69,7 +69,7 @@ class GesturePolicy(
     private var hasAnchor = false
 
     private val lastActionAt = HashMap<String, Long>()
-    private val clickDetector = ClickDetector()
+    private var clickDetector = ClickDetector()
 
     // État du clic par immobilité.
     private var dwellX = 0f
@@ -127,6 +127,17 @@ class GesturePolicy(
 
     fun updateBindings(bindings: GestureBindings) {
         this.bindings = bindings
+    }
+
+    /**
+     * Applique un nouveau réglage de fermeté du clic.
+     *
+     * Le détecteur est reconstruit, et perd donc la course apprise. C'est voulu : l'utilisateur
+     * vient de changer de réglage, il va enchaîner quelques gestes d'essai, et ce sont eux qui
+     * doivent servir de référence. Conserver l'ancienne calibration mêlerait deux régimes.
+     */
+    fun updateClickTuning(tuning: ClickTuning) {
+        clickDetector = ClickDetector(tuning.toConfig())
     }
 
     fun reset() {
