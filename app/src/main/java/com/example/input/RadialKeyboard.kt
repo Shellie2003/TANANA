@@ -24,6 +24,13 @@ import kotlin.math.hypot
  * geste plutôt que cherché comme une touche. C'est le principe des menus gestuels, dont l'efficacité
  * est établie de longue date pour les commandes fréquentes.
  *
+ * ## La validation
+ *
+ * C'est **le même clic que partout ailleurs** : pouce contre index. La saisie validait auparavant
+ * après un demi-seconde d'immobilité dans un secteur, soit une seconde d'attente imposée par
+ * caractère, puisqu'il en faut deux. Un seul geste de validation dans toute l'application signifie
+ * rien de plus à apprendre pour écrire, et une saisie qui va aussi vite que la main.
+ *
  * Kotlin pur, sans dépendance Android : la logique de sélection est entièrement testable.
  */
 class RadialKeyboard(private val config: Config = Config()) {
@@ -34,8 +41,26 @@ class RadialKeyboard(private val config: Config = Config()) {
          * direction est trop bruitée pour être significative — et c'est aussi la zone de repos.
          */
         val deadZone: Float = 0.12f,
-        /** Durée d'immobilité dans un secteur avant de valider. */
-        val dwellMs: Long = 500L
+
+        /**
+         * Validation par immobilité, ou null pour n'accepter que le clic.
+         *
+         * Nulle par défaut, et c'est un changement délibéré. La saisie validait auparavant après
+         * un demi-seconde d'immobilité dans un secteur : la même attente que le clic par pause,
+         * écartée ailleurs pour la même raison. Elle est ici doublement pénalisante, puisqu'il
+         * faut deux validations par caractère — soit une seconde d'attente imposée par lettre.
+         *
+         * Le clic sert donc aussi à écrire. Un seul geste de validation dans toute l'application :
+         * rien de plus à apprendre, et la saisie va aussi vite que la main.
+         */
+        val dwellMs: Long? = null,
+
+        /**
+         * Durée pendant laquelle un secteur doit être pointé avant qu'un clic puisse le valider.
+         * Sans ce délai, un clic tombant pendant que le curseur traverse un secteur y validerait
+         * un caractère non voulu.
+         */
+        val minHoverMs: Long = 80L
     )
 
     /** Un niveau de sélection. */
@@ -82,8 +107,17 @@ class RadialKeyboard(private val config: Config = Config()) {
     /**
      * Met à jour la sélection à partir de la position du curseur, en coordonnées écran
      * normalisées, le centre du clavier étant à (0.5, 0.5).
+     *
+     * @param commit vrai sur la seule frame où un clic est émis
+     * @param clickProgress progression du geste de clic, 0..1, pour l'anneau du secteur pointé
      */
-    fun update(cursorX: Float, cursorY: Float, nowMs: Long): Emission {
+    fun update(
+        cursorX: Float,
+        cursorY: Float,
+        nowMs: Long,
+        commit: Boolean = false,
+        clickProgress: Float = 0f
+    ): Emission {
         val dx = cursorX - 0.5f
         val dy = cursorY - 0.5f
         val distance = hypot(dx, dy)
@@ -104,16 +138,27 @@ class RadialKeyboard(private val config: Config = Config()) {
         }
 
         val elapsed = nowMs - hoverSince
-        progress = (elapsed.toFloat() / config.dwellMs).coerceIn(0f, 1f)
-        if (elapsed < config.dwellMs) return Emission()
 
-        // Validation : on réarme l'immobilité pour éviter une répétition immédiate.
+        // L'anneau montre la progression du geste qui valide réellement : celle du clic quand
+        // c'est lui qui décide, celle de l'immobilité quand c'est elle.
+        val dwellMs = config.dwellMs
+        progress = if (dwellMs != null) {
+            (elapsed.toFloat() / dwellMs).coerceIn(0f, 1f)
+        } else {
+            clickProgress.coerceIn(0f, 1f)
+        }
+
+        val validated = (commit && elapsed >= config.minHoverMs) ||
+            (dwellMs != null && elapsed >= dwellMs)
+        if (!validated) return Emission()
+
+        // Validation : on réarme le chronomètre pour éviter une répétition immédiate.
         hoverSince = nowMs
         progress = 0f
-        return commit(sector)
+        return commitSector(sector)
     }
 
-    private fun commit(sector: Int): Emission = when (level) {
+    private fun commitSector(sector: Int): Emission = when (level) {
         Level.GROUP -> {
             selectedGroup = sector
             level = Level.CHARACTER

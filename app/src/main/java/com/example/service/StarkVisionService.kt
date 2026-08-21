@@ -37,6 +37,7 @@ import com.example.R
 import com.example.control.BindingsStore
 import com.example.control.GesturePolicy
 import com.example.control.SystemAction
+import com.example.gesture.ClickDetector
 import com.example.gesture.GestureType
 import com.example.gesture.HandGestureAnalyzer
 import com.example.gesture.HandGestureListener
@@ -409,7 +410,17 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             return
         }
 
-        val emission = keyboard.update(cursorX, cursorY, SystemClock.uptimeMillis())
+        val now = SystemClock.uptimeMillis()
+        // Le clavier valide au même clic que le reste de l'application, et par le même détecteur :
+        // la course apprise pour cette main survit donc à l'ouverture du clavier.
+        val click = policy.clickOnly(state.pinchRatio, cursorX, cursorY, now)
+        val emission = keyboard.update(
+            cursorX = cursorX,
+            cursorY = cursorY,
+            nowMs = now,
+            commit = click == ClickDetector.Event.CLICK,
+            clickProgress = policy.clickProgress
+        )
         overlayView?.setKeyboard(keyboard.state())
 
         when {

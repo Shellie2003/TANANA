@@ -253,6 +253,17 @@ class GesturePolicy(
     }
 
     /**
+     * Détection du clic seule, sans traduction en action système.
+     *
+     * Sert au clavier gestuel, qui court-circuite la politique de commande — un appui ne doit pas
+     * partir dans l'application sous-jacente pendant qu'on écrit — mais doit valider au même geste
+     * que partout ailleurs. Passer par le même détecteur, et non par une seconde instance, est ce
+     * qui permet à la course apprise de survivre à l'ouverture du clavier.
+     */
+    fun clickOnly(pinchRatio: Float, cursorX: Float, cursorY: Float, nowMs: Long): ClickDetector.Event =
+        clickDetector.update(pinchRatio, cursorX, cursorY, nowMs)
+
+    /**
      * Clic par impulsion du pouce, et prolongation en glisser.
      *
      * Le maintien se résout à son terme comme un clic de souris : un déplacement négligeable
