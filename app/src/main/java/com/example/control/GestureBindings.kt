@@ -20,6 +20,14 @@ enum class BindableAction(
     BACK("back", "Retour", "Revient à l'écran précédent", SystemAction.Back),
     HOME("home", "Accueil", "Retourne à l'écran d'accueil", SystemAction.Home),
     RECENTS("recents", "Applications récentes", "Ouvre le sélecteur d'applications", SystemAction.Recents),
+    SWITCH_NEXT(
+        "switch_next", "Application suivante",
+        "Bascule vers l'application suivante", SystemAction.SwitchNext
+    ),
+    SWITCH_PREVIOUS(
+        "switch_prev", "Application précédente",
+        "Revient à l'application précédente", SystemAction.SwitchPrevious
+    ),
     NOTIFICATIONS(
         "notifications", "Notifications",
         "Déroule le volet des notifications", SystemAction.Notifications
@@ -52,8 +60,21 @@ enum class BindableAction(
     ),
     DRAG("drag", "Glisser", "Saisit et déplace un élément", SystemAction.DragStart(0f, 0f));
 
+    /**
+     * Vrai pour les rôles qui s'exercent tant que la pose est tenue, par opposition aux actions
+     * déclenchées une fois au front montant. La distinction décide de la façon dont la politique
+     * de commande traite l'association, et des choix proposés pour un geste donné.
+     */
+    val isContinuous: Boolean
+        get() = this == CURSOR || this == SCROLL || this == SCROLL_HORIZONTAL || this == DRAG
+
     companion object {
         fun fromId(id: String): BindableAction? = entries.firstOrNull { it.id == id }
+
+        /** Actions proposables pour un geste : un balayage n'accepte que les actions ponctuelles. */
+        fun assignableTo(gesture: GestureType): List<BindableAction> =
+            if (GestureBindings.isSwipe(gesture)) entries.filterNot { it.isContinuous }
+            else entries.toList()
     }
 }
 
@@ -85,7 +106,14 @@ data class GestureBindings(
         CONFIGURABLE_POSES.joinToString(";") { "${it.name}=${get(it).id}" }
 
     companion object {
-        /** Poses que l'utilisateur peut réaffecter. IDLE et les balayages n'en font pas partie. */
+        /**
+         * Gestes que l'utilisateur peut réaffecter, dans l'ordre d'affichage : les poses tenues
+         * d'abord, les balayages ensuite.
+         *
+         * Les balayages sont désormais configurables au même titre que les poses. Ils étaient
+         * jusqu'ici câblés en dur dans la politique de commande, ce qui les rendait seuls
+         * inaccessibles à la personnalisation sans qu'aucune raison ne le justifie.
+         */
         val CONFIGURABLE_POSES = listOf(
             GestureType.POINT,
             GestureType.PINCH,
@@ -93,9 +121,30 @@ data class GestureBindings(
             GestureType.THREE_FINGER,
             GestureType.OPEN_PALM,
             GestureType.FIST,
-            GestureType.THUMB_UP
+            GestureType.THUMB_UP,
+            GestureType.PINKY_UP,
+            GestureType.ROCK,
+            GestureType.SWIPE_LEFT,
+            GestureType.SWIPE_RIGHT,
+            GestureType.SWIPE_UP,
+            GestureType.SWIPE_DOWN
         )
 
+        /** Vrai pour les gestes de mouvement, qui n'ont pas de durée et ne peuvent porter de rôle continu. */
+        fun isSwipe(gesture: GestureType): Boolean = gesture in setOf(
+            GestureType.SWIPE_LEFT,
+            GestureType.SWIPE_RIGHT,
+            GestureType.SWIPE_UP,
+            GestureType.SWIPE_DOWN
+        )
+
+        /**
+         * Les rôles continus vont aux poses les plus confortables à tenir ; les actions
+         * ponctuelles, dont un déclenchement accidentel coûte le plus cher, aux poses les plus
+         * franches. Les deux poses ajoutées comblent les manques signalés à l'usage : le volet des
+         * réglages rapides — d'où se basculent données mobiles et Wi-Fi — et le clavier gestuel,
+         * qui n'avait jusqu'ici aucun geste pour l'ouvrir.
+         */
         val DEFAULTS: Map<GestureType, BindableAction> = mapOf(
             GestureType.POINT to BindableAction.CURSOR,
             GestureType.PINCH to BindableAction.DRAG,
@@ -103,7 +152,13 @@ data class GestureBindings(
             GestureType.THREE_FINGER to BindableAction.RECENTS,
             GestureType.OPEN_PALM to BindableAction.PLAY_PAUSE,
             GestureType.FIST to BindableAction.BACK,
-            GestureType.THUMB_UP to BindableAction.HOME
+            GestureType.THUMB_UP to BindableAction.HOME,
+            GestureType.PINKY_UP to BindableAction.KEYBOARD,
+            GestureType.ROCK to BindableAction.QUICK_SETTINGS,
+            GestureType.SWIPE_LEFT to BindableAction.SWITCH_PREVIOUS,
+            GestureType.SWIPE_RIGHT to BindableAction.SWITCH_NEXT,
+            GestureType.SWIPE_UP to BindableAction.HOME,
+            GestureType.SWIPE_DOWN to BindableAction.NOTIFICATIONS
         )
 
         /**

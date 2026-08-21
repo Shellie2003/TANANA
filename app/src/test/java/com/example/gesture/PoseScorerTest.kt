@@ -57,8 +57,56 @@ class PoseScorerTest {
 
     @Test
     fun `une main ne ressemblant a aucun modele ne decide rien`() {
-        // Doigts alternés : ne correspond à aucune pose du vocabulaire.
-        assertNull(scorer.classify(metrics(0f, 1f, 0f, 1f)))
+        // Tous les doigts à mi-course — extension mesurée 0,56 — c'est-à-dire l'état traversé en
+        // changeant de pose. Il ne doit ressembler à rien d'assez près pour déclencher une action
+        // au passage.
+        assertNull(scorer.classify(metrics(0.4f, 0.4f, 0.4f, 0.4f)))
+    }
+
+    @Test
+    fun `les deux poses ajoutees sont reconnues`() {
+        assertEquals(GestureType.PINKY_UP, scorer.classify(SyntheticHand.metrics(SyntheticHand.pinkyUp())))
+        assertEquals(GestureType.ROCK, scorer.classify(SyntheticHand.metrics(SyntheticHand.rock())))
+    }
+
+    /**
+     * Test de non-régression du vocabulaire : chaque pose du catalogue doit se reconnaître
+     * elle-même, avec une marge supérieure au seuil de rejet.
+     *
+     * C'est le garde-fou qui manquait. Toute pose ajoutée par la suite qui empiéterait sur une
+     * pose existante fera échouer ce test au lieu de dégrader silencieusement la précision sur
+     * l'appareil — c'est-à-dire au seul endroit où le défaut était jusqu'ici observable.
+     */
+    @Test
+    fun `chaque pose du vocabulaire se distingue de toutes les autres`() {
+        val config = PoseScorer.Config()
+        val cases = mapOf(
+            GestureType.POINT to SyntheticHand.pointing(),
+            GestureType.TWO_FINGER to SyntheticHand.twoFingers(),
+            GestureType.THREE_FINGER to SyntheticHand.threeFingers(),
+            GestureType.OPEN_PALM to SyntheticHand.openPalm(),
+            GestureType.PINKY_UP to SyntheticHand.pinkyUp(),
+            GestureType.ROCK to SyntheticHand.rock(),
+            GestureType.FIST to SyntheticHand.fist(),
+            GestureType.THUMB_UP to SyntheticHand.thumbUp()
+        )
+
+        assertEquals(
+            "une pose du catalogue n'est pas couverte par ce test",
+            scorer.poses.toSet(), cases.keys
+        )
+
+        cases.forEach { (expected, hand) ->
+            val m = SyntheticHand.metrics(hand)
+            val scores = scorer.scoreAll(m)
+            val margin = scores[0].score - scores[1].score
+            assertEquals("$expected mal classée (${scores.take(2)})", expected, scores[0].pose)
+            assertTrue(
+                "$expected trop proche de ${scores[1].pose} : marge $margin",
+                margin >= config.minMargin
+            )
+            assertEquals("$expected non retenue par classify", expected, scorer.classify(m))
+        }
     }
 
     @Test

@@ -47,16 +47,41 @@ class PoseScorer(private val config: Config = Config()) {
         val thumb: Float?
     )
 
+    /**
+     * Les modèles sont choisis pour qu'aucune paire ne diffère par moins d'un doigt long entier —
+     * à la seule exception de poing / pouce levé, que le pouce sépare explicitement.
+     *
+     * C'est la raison pour laquelle certaines poses pourtant faciles à faire ont été **écartées** :
+     *
+     *  - *quatre doigts* (pouce replié) ne se distingue de la main ouverte que par le pouce, le
+     *    plus mal suivi des cinq doigts, et par une distinction — pouce rentré ou sorti — que
+     *    personne ne fait de façon reproductible ;
+     *  - le *pistolet* (index tendu + pouce sorti) obligerait à imposer un pouce replié au
+     *    pointage, alors que c'est précisément le doigt qui bouge pour cliquer.
+     *
+     * Ajouter ces deux poses aurait porté le vocabulaire à onze signes en rendant instables les
+     * deux plus utilisés. Neuf signes fiables valent mieux que onze dont deux se disputent.
+     */
     private val templates = listOf(
         Template(GestureType.POINT, 1f, 0f, 0f, 0f, null),
         Template(GestureType.TWO_FINGER, 1f, 1f, 0f, 0f, null),
         Template(GestureType.THREE_FINGER, 1f, 1f, 1f, 0f, null),
         Template(GestureType.OPEN_PALM, 1f, 1f, 1f, 1f, 1f),
+        Template(GestureType.PINKY_UP, 0f, 0f, 0f, 1f, null),
+        Template(GestureType.ROCK, 1f, 0f, 0f, 1f, null),
         // Poing et pouce levé ne diffèrent que par le pouce : c'est donc lui qui doit trancher,
         // et le modèle l'exige explicitement dans les deux cas.
         Template(GestureType.FIST, 0f, 0f, 0f, 0f, 0f),
         Template(GestureType.THUMB_UP, 0f, 0f, 0f, 0f, 1f)
     )
+
+    /** Modèles exposés pour les tests de discriminabilité et l'aide à l'écran. */
+    val poses: List<GestureType> get() = templates.map { it.pose }
+
+    /** Extension attendue des quatre doigts longs pour une pose donnée, ou null si inconnue. */
+    fun templateOf(pose: GestureType): FloatArray? =
+        templates.firstOrNull { it.pose == pose }
+            ?.let { floatArrayOf(it.index, it.middle, it.ring, it.pinky) }
 
     /** Scores de toutes les poses, du plus probable au moins probable. */
     fun scoreAll(metrics: HandMetrics): List<PoseScore> =

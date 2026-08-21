@@ -2,8 +2,10 @@ package com.example.control
 
 import com.example.gesture.GestureType
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class GesturePolicyTest {
 
@@ -225,6 +227,77 @@ class GesturePolicyTest {
     fun `le balayage droite passe a l application suivante`() {
         val actions = policy().onGesture(GestureType.SWIPE_RIGHT, 0.5f, 0.5f, isNewPose = true, timestampMs = 0)
         assertTrue(actions.contains(SystemAction.SwitchNext))
+    }
+
+    @Test
+    fun `le balayage bas deroule les notifications`() {
+        val actions = policy().onGesture(GestureType.SWIPE_DOWN, 0.5f, 0.5f, isNewPose = true, timestampMs = 0)
+        assertTrue(actions.contains(SystemAction.Notifications))
+    }
+
+    @Test
+    fun `un balayage est personnalisable comme une pose`() {
+        val custom = GestureBindings().with(GestureType.SWIPE_UP, BindableAction.SCREENSHOT)
+        val actions = policy(custom)
+            .onGesture(GestureType.SWIPE_UP, 0.5f, 0.5f, isNewPose = true, timestampMs = 0)
+        assertTrue(actions.contains(SystemAction.Screenshot))
+    }
+
+    /**
+     * Un balayage n'a pas d'image suivante : lui confier un rôle continu produirait un curseur
+     * d'une seule frame, c'est-à-dire un saut. La configuration est neutralisée plutôt qu'exécutée.
+     */
+    @Test
+    fun `un role continu affecte a un balayage est neutralise`() {
+        val custom = GestureBindings().with(GestureType.SWIPE_UP, BindableAction.CURSOR)
+        val actions = policy(custom)
+            .onGesture(GestureType.SWIPE_UP, 0.5f, 0.5f, isNewPose = true, timestampMs = 0)
+        assertTrue(actions.none { it is SystemAction.MoveCursor })
+    }
+
+    @Test
+    fun `l interface ne propose pas de role continu pour un balayage`() {
+        val proposed = BindableAction.assignableTo(GestureType.SWIPE_LEFT)
+        assertTrue(proposed.none { it.isContinuous })
+        assertTrue(BindableAction.assignableTo(GestureType.POINT).any { it.isContinuous })
+    }
+
+    /**
+     * Un balayage traverse la pose tenue. S'il la remplaçait, le défilement en cours perdrait sa
+     * référence et repartirait d'un saut à l'image suivante.
+     */
+    @Test
+    fun `un balayage ne reamorce pas le geste continu sous-jacent`() {
+        val p = policy()
+        p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.50f, isNewPose = true, timestampMs = 0)
+        p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.45f, isNewPose = false, timestampMs = 33)
+        p.onGesture(GestureType.SWIPE_RIGHT, 0.5f, 0.45f, isNewPose = true, timestampMs = 66)
+        val after = p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.42f, isNewPose = false, timestampMs = 99)
+        val scroll = after.filterIsInstance<SystemAction.Scroll>().singleOrNull()
+        assertTrue("le défilement a été perdu ou a sauté", scroll != null && abs(scroll.amount) < 0.2f)
+    }
+
+    // --- Poses ajoutées -----------------------------------------------------------------------
+
+    @Test
+    fun `l auriculaire ouvre le clavier gestuel`() {
+        assertTrue(
+            hold(policy(), GestureType.PINKY_UP, frames = 10).contains(SystemAction.ToggleKeyboard)
+        )
+    }
+
+    /** Les données mobiles se basculent depuis les réglages rapides : ce geste y donne accès. */
+    @Test
+    fun `le signe cornes ouvre les reglages rapides`() {
+        assertTrue(hold(policy(), GestureType.ROCK, frames = 10).contains(SystemAction.QuickSettings))
+    }
+
+    @Test
+    fun `chaque geste configurable a une action par defaut definie`() {
+        val bindings = GestureBindings()
+        GestureBindings.CONFIGURABLE_POSES.forEach { pose ->
+            assertNotEquals("$pose n'a pas d'action par défaut", BindableAction.NONE, bindings[pose])
+        }
     }
 
     @Test

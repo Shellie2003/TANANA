@@ -2,6 +2,7 @@ package com.example.gesture
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -260,6 +261,53 @@ class GestureClassifierTest {
             t += FRAME_MS
         }
         assertEquals(0, events)
+    }
+
+    /** Main à trois doigts placée librement dans l'image, pour éprouver les deux axes. */
+    private fun threeFingersAt(cx: Float, cy: Float) = SyntheticHand.metrics(
+        SyntheticHand.build(cx = cx, cy = cy, extension = floatArrayOf(1f, 1f, 1f, 0f))
+    )
+
+    private fun swipeDirection(steps: List<Pair<Float, Float>>): GestureType? {
+        val classifier = GestureClassifier()
+        var t = 0L
+        var direction: GestureType? = null
+        repeat(5) { classifier.update(threeFingersAt(steps.first().first, steps.first().second), t); t += FRAME_MS }
+        steps.forEach { (x, y) ->
+            val r = classifier.update(threeFingersAt(x, y), t)
+            if (r.isSwipeEvent) direction = r.gesture
+            t += FRAME_MS
+        }
+        return direction
+    }
+
+    /**
+     * Le volet des notifications — et donc les données mobiles — n'était atteignable par aucun
+     * geste tant que seuls les balayages horizontaux existaient.
+     */
+    @Test
+    fun `un balayage vers le bas est reconnu`() {
+        assertEquals(
+            GestureType.SWIPE_DOWN,
+            swipeDirection((0..6).map { 0.5f to 0.30f + it * 0.06f })
+        )
+    }
+
+    @Test
+    fun `un balayage vers le haut est reconnu`() {
+        assertEquals(
+            GestureType.SWIPE_UP,
+            swipeDirection((0..6).map { 0.5f to 0.70f - it * 0.06f })
+        )
+    }
+
+    /**
+     * Un mouvement oblique ne doit produire aucune direction : entre « notifications » et
+     * « application suivante », deviner serait pire que ne rien faire.
+     */
+    @Test
+    fun `un balayage oblique ne produit aucune direction`() {
+        assertNull(swipeDirection((0..6).map { 0.30f + it * 0.06f to 0.30f + it * 0.055f }))
     }
 
     // --- Robustesse --------------------------------------------------------------------------

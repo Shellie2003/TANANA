@@ -136,12 +136,21 @@ class GesturePolicy(
 
         // La référence d'un geste continu est réarmée à chaque changement de pose : sans cela, le
         // déplacement effectué dans la pose précédente serait consommé d'un bloc.
-        if (gesture != lastPose) {
+        //
+        // Un balayage est explicitement exclu de ce réarmement. Il ne remplace pas la pose tenue,
+        // il la traverse : réarmer sur son passage ferait perdre au défilement en cours sa
+        // référence, et l'image suivante repartirait d'un saut.
+        if (gesture != lastPose && !GestureBindings.isSwipe(gesture)) {
             hasAnchor = false
             resetDwell()
         }
 
-        val binding = bindings[gesture]
+        // Un balayage est un évènement sans durée : il ne peut pas porter un rôle continu, qui
+        // n'aurait aucune image suivante sur laquelle s'exercer. Une configuration qui en
+        // demanderait un est neutralisée ici plutôt que de produire un curseur d'une seule frame.
+        val binding = bindings[gesture].let {
+            if (GestureBindings.isSwipe(gesture) && it.isContinuous) BindableAction.NONE else it
+        }
 
         when (binding) {
             BindableAction.CURSOR -> {
@@ -182,13 +191,10 @@ class GesturePolicy(
             }
         }
 
-        // Les balayages restent câblés à la navigation entre applications : ce sont des évènements
-        // de mouvement, pas des poses, et ils ne sont donc pas personnalisables.
-        when (gesture) {
-            GestureType.SWIPE_RIGHT -> emitOnce(actions, "switch", SystemAction.SwitchNext, timestampMs)
-            GestureType.SWIPE_LEFT -> emitOnce(actions, "switch", SystemAction.SwitchPrevious, timestampMs)
-            else -> lastPose = gesture
-        }
+        // Un balayage traverse la pose tenue sans la remplacer : la mémoriser comme pose courante
+        // ferait réarmer les gestes continus à chaque balayage, et le défilement repartirait de
+        // zéro juste après. La pose sous-jacente est donc conservée.
+        if (!GestureBindings.isSwipe(gesture)) lastPose = gesture
 
         return actions
     }

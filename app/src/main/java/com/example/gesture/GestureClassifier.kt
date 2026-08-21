@@ -34,9 +34,23 @@ enum class GestureType {
     /** Pouce et index joints. Clic, et glisser tant que le pincement est maintenu. */
     PINCH,
 
-    /** Balayages horizontaux, émis comme évènements ponctuels. */
+    /**
+     * Auriculaire seul tendu. Se distingue de toutes les autres poses par un doigt entier, ce qui
+     * en fait un signe franc malgré son apparente discrétion.
+     */
+    PINKY_UP,
+
+    /**
+     * Index et auriculaire tendus, majeur et annulaire repliés — le signe « cornes ». Deux doigts
+     * non adjacents : aucune pose du vocabulaire ne s'en approche.
+     */
+    ROCK,
+
+    /** Balayages, émis comme évènements ponctuels sur les quatre directions. */
     SWIPE_LEFT,
-    SWIPE_RIGHT
+    SWIPE_RIGHT,
+    SWIPE_UP,
+    SWIPE_DOWN
 }
 
 /** Résultat d'une passe de classification. */
@@ -71,7 +85,12 @@ data class GestureConfig(
     val swipeWindowMs: Long = 400L,
     val swipeMinDistance: Float = 0.20f,
     val swipeMinVelocity: Float = 0.80f,
-    val swipeMaxVerticalRatio: Float = 0.6f,
+    /**
+     * Rapport maximal entre l'axe secondaire et l'axe principal. Un balayage doit être franchement
+     * aligné : c'est ce qui empêche un mouvement oblique de produire une direction au hasard, et
+     * donc de confondre « notifications » avec « application suivante ».
+     */
+    val swipeMaxCrossRatio: Float = 0.6f,
     val swipeCooldownMs: Long = 600L,
     // En deçà de cette qualité géométrique, aucune action n'est déclenchée.
     val minQuality: Float = 0.35f,
@@ -255,9 +274,14 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
     }
 
     /**
-     * Un balayage n'est reconnu que si le mouvement est **à la fois** ample, rapide et
-     * majoritairement horizontal. Exiger les trois critères simultanément supprime les
-     * déclenchements accidentels quand la main entre ou sort du champ.
+     * Un balayage n'est reconnu que si le mouvement est **à la fois** ample, rapide, franchement
+     * aligné sur un axe et cohérent en direction. Exiger les quatre critères simultanément
+     * supprime les déclenchements accidentels quand la main entre ou sort du champ.
+     *
+     * Les quatre directions sont traitées par le même code : l'axe dominant est choisi d'abord,
+     * puis les critères sont appliqués à cet axe. Deux implémentations parallèles auraient
+     * fatalement divergé, et les balayages verticaux se seraient comportés autrement que les
+     * horizontaux sans qu'aucun test ne le signale.
      */
     private fun detectSwipe(now: Long, allowed: Boolean): GestureType? {
         if (!allowed) return null
@@ -269,29 +293,36 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
 
         val dx = historyX.last() - historyX.first()
         val dy = historyY.last() - historyY.first()
-        if (abs(dx) < config.swipeMinDistance) return null
-        if (abs(dy) > abs(dx) * config.swipeMaxVerticalRatio) return null
 
-        val velocity = abs(dx) / (dtMs / 1000f)
-        if (velocity < config.swipeMinVelocity) return null
+        val horizontal = abs(dx) >= abs(dy)
+        val main = if (horizontal) dx else dy
+        val cross = if (horizontal) dy else dx
+        val samples = if (horizontal) historyX.toList() else historyY.toList()
+
+        if (abs(main) < config.swipeMinDistance) return null
+        if (abs(cross) > abs(main) * config.swipeMaxCrossRatio) return null
+        if (abs(main) / (dtMs / 1000f) < config.swipeMinVelocity) return null
 
         // Cohérence de direction : distingue un balayage franc d'un aller-retour.
-        val sign = if (dx > 0) 1f else -1f
+        val sign = if (main > 0) 1f else -1f
         var coherent = 0
-        var steps = 0
-        val xs = historyX.toList()
-        for (i in 1 until xs.size) {
-            val step = xs[i] - xs[i - 1]
-            steps++
-            if (step * sign >= -0.005f) coherent++
+        for (i in 1 until samples.size) {
+            if ((samples[i] - samples[i - 1]) * sign >= -0.005f) coherent++
         }
-        if (steps == 0 || coherent.toFloat() / steps < 0.75f) return null
+        val steps = samples.size - 1
+        if (steps <= 0 || coherent.toFloat() / steps < 0.75f) return null
 
         lastSwipeTime = now
         historyTimes.clear()
         historyX.clear()
         historyY.clear()
 
-        return if (dx > 0) GestureType.SWIPE_RIGHT else GestureType.SWIPE_LEFT
+        return when {
+            horizontal && main > 0 -> GestureType.SWIPE_RIGHT
+            horizontal -> GestureType.SWIPE_LEFT
+            // L'axe Y de l'image croît vers le bas : une main qui monte produit un delta négatif.
+            main > 0 -> GestureType.SWIPE_DOWN
+            else -> GestureType.SWIPE_UP
+        }
     }
 }
