@@ -29,12 +29,15 @@ import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -65,6 +68,8 @@ import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
 import com.example.control.BindableAction
 import com.example.control.GestureBindings
+import com.example.control.GesturePolicy
+import com.example.gesture.ClickDetector
 import com.example.gesture.GestureType
 import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
@@ -101,7 +106,9 @@ data class EngineStatus(
     /** Régime de cadence : indique si le moteur économise ou tourne à plein. */
     val powerMode: PowerMode = PowerMode.IDLE,
     /** Proportion d'images économisées par la régulation, entre 0 et 1. */
-    val savingsRatio: Float = 0f
+    val savingsRatio: Float = 0f,
+    /** État du geste de clic : course apprise, réussites, cause du dernier échec. */
+    val click: GesturePolicy.ClickTelemetry = GesturePolicy.ClickTelemetry()
 )
 
 /**
@@ -155,14 +162,32 @@ fun StarkControlCenter(
             )
         }
 
+        // La carte du clic vient avant l'aide-mémoire : c'est le geste le plus fréquent, le seul
+        // dont l'échec soit silencieux, et donc celui dont l'utilisateur a besoin d'un retour.
+        if (status.isRunning) {
+            item { SectionTitle("Clic", "Pouce contre index, d'un contact bref") }
+            item { ClickCard(status.click) }
+        }
+
         item {
             SectionTitle(
-                "Gestes",
+                "Poses",
                 "Fonctionnent partout. Touchez une ligne pour changer son action."
             )
         }
         item {
             GestureLegend(
+                docs = POSE_DOCS,
+                activeGesture = status.gesture,
+                bindings = bindings,
+                onRebind = onRebind
+            )
+        }
+
+        item { SectionTitle("Balayages", "En pose à trois doigts, d'un mouvement franc") }
+        item {
+            GestureLegend(
+                docs = SWIPE_DOCS,
                 activeGesture = status.gesture,
                 bindings = bindings,
                 onRebind = onRebind
@@ -180,7 +205,7 @@ fun StarkControlCenter(
 private fun Header(status: EngineStatus) {
     Column {
         Text(
-            text = "STARK HUD",
+            text = "NEXUS",
             color = Color.White,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -423,22 +448,168 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
     }
 }
 
+/**
+ * Retour sur le geste de clic.
+ *
+ * Le clic gestuel a une propriété qu'aucun autre geste ne partage : **son échec est silencieux**.
+ * Un défilement qui ne part pas se voit ; un clic qui ne part pas est indiscernable d'une cible
+ * manquée ou d'une application qui ne réagit pas. L'utilisateur ne peut donc ni corriger son geste
+ * ni savoir s'il peut se fier au système — ce qui est exactement le contraire de la confiance
+ * recherchée.
+ *
+ * Cette carte rend le geste observable : la course apprise pour *cette* main, la progression en
+ * temps réel, la part de gestes aboutis, et la cause nommée du dernier échec.
+ */
+@Composable
+private fun ClickCard(click: GesturePolicy.ClickTelemetry) {
+    val rate = click.successRate
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.05f))
+            .border(1.dp, StarkGold.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        if (!click.isCalibrated) {
+            Text(
+                text = "Calibration en cours — gardez la main dans le champ quelques secondes.",
+                color = StarkGold.copy(alpha = 0.9f),
+                fontSize = 12.sp
+            )
+            return@Column
+        }
+
+        // Jauge de progression : la même grandeur que celle qui déclenche l'appui. Ce que
+        // l'utilisateur voit se remplir ici est littéralement ce qui décide sur l'appareil.
+        Text("Approche du contact", color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.White.copy(alpha = 0.08f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(click.progress.coerceIn(0f, 1f))
+                    .height(8.dp)
+                    .background(StarkGold)
+            )
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Metric("Clics", "${click.clicks}", Modifier.weight(1f))
+            Metric(
+                "Réussite",
+                rate?.let { "${(it * 100).toInt()} %" } ?: "—",
+                Modifier.weight(1f)
+            )
+            Metric("Course", "%.2f".format(click.baseline), Modifier.weight(1f))
+        }
+
+        val advice = adviceFor(click)
+        if (advice != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = advice,
+                color = StarkGold.copy(alpha = 0.85f),
+                fontSize = 11.sp,
+                lineHeight = 15.sp
+            )
+        }
+    }
+}
+
+/**
+ * Traduit la cause technique du dernier rejet en une correction que l'utilisateur peut appliquer.
+ *
+ * Afficher « TOO_SLOW » n'aiderait personne : ce qu'il faut dire, c'est quoi faire autrement.
+ */
+private fun adviceFor(click: GesturePolicy.ClickTelemetry): String? = when (click.lastRejection) {
+    ClickDetector.Rejection.TOO_SHALLOW ->
+        "Votre pouce s'approche sans toucher l'index. Laissez-les se rejoindre franchement : " +
+            "le contact est ce qui déclenche l'appui, et il se sent au doigt."
+
+    ClickDetector.Rejection.TOO_SLOW ->
+        "Le mouvement est trop lent pour être distingué d'un repositionnement de la main. " +
+            "Frappez d'un coup sec plutôt que de refermer progressivement."
+
+    ClickDetector.Rejection.COOLDOWN ->
+        "Deux appuis très rapprochés ont été détectés ; le second a été ignoré."
+
+    ClickDetector.Rejection.NONE -> null
+}
+
 /** Description d'un geste dans l'aide-mémoire. */
 private data class GestureDoc(
     val gesture: GestureType,
     val icon: ImageVector,
     val name: String,
+    /** Comment former le geste. Sans cette phrase, le nom seul se prête à plusieurs lectures. */
+    val hint: String,
     val color: Color
 )
 
-private val GESTURE_DOCS = listOf(
-    GestureDoc(GestureType.POINT, Icons.Default.TouchApp, "Index seul", StarkCyan),
-    GestureDoc(GestureType.PINCH, Icons.Default.CheckCircle, "Pouce + index", StarkGold),
-    GestureDoc(GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur", StarkBlue),
-    GestureDoc(GestureType.THREE_FINGER, Icons.Default.SwapHoriz, "Trois doigts", StarkBlue),
-    GestureDoc(GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte", StarkCyan),
-    GestureDoc(GestureType.FIST, Icons.Default.ArrowBack, "Poing", StarkRed),
-    GestureDoc(GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé", StarkRed)
+private val POSE_DOCS = listOf(
+    GestureDoc(
+        GestureType.POINT, Icons.Default.TouchApp, "Index seul",
+        "Index tendu, les autres doigts repliés", StarkCyan
+    ),
+    GestureDoc(
+        GestureType.PINCH, Icons.Default.CheckCircle, "Pouce + index joints",
+        "Maintenez le contact pour saisir et déplacer", StarkGold
+    ),
+    GestureDoc(
+        GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur",
+        "Montez ou descendez la main pour faire défiler", StarkBlue
+    ),
+    GestureDoc(
+        GestureType.THREE_FINGER, Icons.Default.SwapHoriz, "Trois doigts",
+        "C'est aussi la pose des balayages", StarkBlue
+    ),
+    GestureDoc(
+        GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte",
+        "Les cinq doigts écartés, paume vers la caméra", StarkCyan
+    ),
+    GestureDoc(
+        GestureType.FIST, Icons.Default.ArrowBack, "Poing",
+        "Main fermée, pouce rentré", StarkRed
+    ),
+    GestureDoc(
+        GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé",
+        "Poing fermé, pouce sorti", StarkRed
+    ),
+    GestureDoc(
+        GestureType.PINKY_UP, Icons.Default.Keyboard, "Auriculaire seul",
+        "Petit doigt tendu, les autres repliés", StarkGold
+    ),
+    GestureDoc(
+        GestureType.ROCK, Icons.Default.Wifi, "Cornes",
+        "Index et auriculaire tendus, majeur et annulaire repliés", StarkGold
+    )
+)
+
+private val SWIPE_DOCS = listOf(
+    GestureDoc(
+        GestureType.SWIPE_LEFT, Icons.Default.ArrowBack, "Balayage à gauche",
+        "En pose à trois doigts, d'un geste franc", StarkBlue
+    ),
+    GestureDoc(
+        GestureType.SWIPE_RIGHT, Icons.Default.SwapHoriz, "Balayage à droite",
+        "En pose à trois doigts, d'un geste franc", StarkBlue
+    ),
+    GestureDoc(
+        GestureType.SWIPE_UP, Icons.Default.UnfoldMore, "Balayage vers le haut",
+        "En pose à trois doigts, main qui remonte", StarkBlue
+    ),
+    GestureDoc(
+        GestureType.SWIPE_DOWN, Icons.Default.Notifications, "Balayage vers le bas",
+        "En pose à trois doigts, main qui descend", StarkBlue
+    )
 )
 
 /**
@@ -452,6 +623,7 @@ private val GESTURE_DOCS = listOf(
  */
 @Composable
 private fun GestureLegend(
+    docs: List<GestureDoc>,
     activeGesture: GestureType,
     bindings: GestureBindings,
     onRebind: (GestureType, BindableAction) -> Unit
@@ -459,7 +631,7 @@ private fun GestureLegend(
     var editing by remember { mutableStateOf<GestureType?>(null) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (doc in GESTURE_DOCS) {
+        for (doc in docs) {
             val isActive = doc.gesture == activeGesture
             val bound = bindings[doc.gesture]
 
@@ -507,12 +679,21 @@ private fun GestureLegend(
                 if (editing == doc.gesture) {
                     Spacer(Modifier.height(10.dp))
                     Text(
+                        text = doc.hint,
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
                         text = bound.description,
                         color = Color.White.copy(alpha = 0.5f),
                         fontSize = 11.sp
                     )
                     Spacer(Modifier.height(10.dp))
                     ActionPicker(
+                        // Un balayage ne dure qu'une image : les rôles continus ne lui sont pas
+                        // proposés, plutôt que d'être proposés puis ignorés silencieusement.
+                        options = BindableAction.assignableTo(doc.gesture),
                         current = bound,
                         onPick = {
                             onRebind(doc.gesture, it)
@@ -527,9 +708,13 @@ private fun GestureLegend(
 
 /** Liste des actions assignables. */
 @Composable
-private fun ActionPicker(current: BindableAction, onPick: (BindableAction) -> Unit) {
+private fun ActionPicker(
+    options: List<BindableAction>,
+    current: BindableAction,
+    onPick: (BindableAction) -> Unit
+) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (action in BindableAction.entries) {
+        for (action in options) {
             val selected = action == current
             Row(
                 modifier = Modifier

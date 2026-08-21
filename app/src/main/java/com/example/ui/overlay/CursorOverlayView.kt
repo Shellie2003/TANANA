@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Rect
+import android.os.SystemClock
 import android.view.View
 import com.example.gesture.GestureType
 import com.example.input.RadialKeyboard
@@ -29,8 +30,18 @@ class CursorOverlayView(context: Context) : View(context) {
     private var cursorX = 0.5f
     private var cursorY = 0.5f
     private var gesture = GestureType.IDLE
-    private var pinchStrength = 0f
+
+    /** Progression du geste de clic en cours, 0..1. */
+    private var clickProgress = 0f
+
+    /** Progression du maintien, 0..1 : annonce la bascule du clic vers le glisser. */
+    private var holdProgress = 0f
     private var visible = false
+
+    // Onde de confirmation du dernier appui.
+    private var tapX = 0f
+    private var tapY = 0f
+    private var tapAt = 0L
 
     private val density = resources.displayMetrics.density
 
@@ -78,23 +89,43 @@ class CursorOverlayView(context: Context) : View(context) {
         x: Float,
         y: Float,
         gesture: GestureType,
-        pinchStrength: Float,
+        clickProgress: Float,
+        holdProgress: Float,
         visible: Boolean
     ) {
         // Une fenêtre de superposition invalidée en continu fait recomposer tout l'écran par le
         // compositeur, y compris l'application au premier plan. Quand le curseur est masqué et
         // le reste inchangé, ne rien redessiner est une économie directe de GPU.
-        val unchanged = !visible && !this.visible
+        val unchanged = !visible && !this.visible && !tapVisible()
         this.cursorX = x
         this.cursorY = y
         this.gesture = gesture
-        this.pinchStrength = pinchStrength
+        this.clickProgress = clickProgress
+        this.holdProgress = holdProgress
         this.visible = visible
         if (unchanged) return
 
         rotation = (rotation + 2f) % 360f
         invalidate()
     }
+
+    /**
+     * Déclenche l'onde de confirmation d'un appui.
+     *
+     * Un appui gestuel ne produit aucun retour tactile. Si l'application sous-jacente ne réagit
+     * pas visiblement — cible manquée, zone inerte — l'utilisateur n'a aucun moyen de savoir si
+     * le clic est parti ou si son geste a été rejeté. L'onde lève cette ambiguïté, et c'est elle
+     * qui distingue « j'ai mal visé » de « le geste n'a pas été reconnu ».
+     */
+    fun flashTap(x: Float, y: Float) {
+        tapX = x
+        tapY = y
+        tapAt = SystemClock.uptimeMillis()
+        invalidate()
+    }
+
+    private fun tapVisible(): Boolean =
+        tapAt != 0L && SystemClock.uptimeMillis() - tapAt < TAP_RIPPLE_MS
 
     /** Masque le curseur et cesse de redessiner. */
     fun hide() {
@@ -106,6 +137,7 @@ class CursorOverlayView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         keyboard?.let { drawKeyboard(canvas, it) }
+        drawTapRipple(canvas)
         if (!visible) return
 
         val cx = cursorX * width
@@ -135,11 +167,39 @@ class CursorOverlayView(context: Context) : View(context) {
         corePaint.color = color
         canvas.drawCircle(cx, cy, 3.5f * density, corePaint)
 
-        // Anneau de force du pincement : l'utilisateur voit le clic approcher avant qu'il ne parte.
-        if (pinchStrength > 0.05f) {
-            strengthPaint.color = withAlpha(COLOR_GOLD, 0.25f + 0.6f * pinchStrength)
-            canvas.drawCircle(cx, cy, radius * (1.45f - 0.4f * pinchStrength), strengthPaint)
+        // Arc de progression du clic. Tracé comme un arc et non comme un cercle plein : la part
+        // parcourue est alors lisible d'un coup d'œil, alors qu'un simple changement de rayon ou
+        // d'opacité ne dit pas à quelle distance du déclenchement on se trouve.
+        if (clickProgress > 0.02f) {
+            strengthPaint.color = withAlpha(COLOR_GOLD, 0.35f + 0.65f * clickProgress)
+            val r = radius * 1.45f
+            canvas.drawArc(cx - r, cy - r, cx + r, cy + r, -90f, 360f * clickProgress, false, strengthPaint)
         }
+
+        // Second arc, à l'extérieur : la bascule du clic vers le glisser. Deux anneaux distincts
+        // plutôt qu'un seul réutilisé, sans quoi on ne saurait pas lequel des deux se remplit.
+        if (holdProgress > 0.02f) {
+            strengthPaint.color = withAlpha(COLOR_RED, 0.30f + 0.60f * holdProgress)
+            val r = radius * 1.85f
+            canvas.drawArc(cx - r, cy - r, cx + r, cy + r, -90f, 360f * holdProgress, false, strengthPaint)
+        }
+    }
+
+    /** Onde de confirmation : un disque qui s'élargit et s'efface en un tiers de seconde. */
+    private fun drawTapRipple(canvas: Canvas) {
+        if (!tapVisible()) return
+        val progress = (SystemClock.uptimeMillis() - tapAt).toFloat() / TAP_RIPPLE_MS
+        val x = tapX * width
+        val y = tapY * height
+        val r = (10f + 34f * progress) * density
+
+        haloPaint.color = withAlpha(COLOR_GOLD, 0.30f * (1f - progress))
+        canvas.drawCircle(x, y, r, haloPaint)
+        strengthPaint.color = withAlpha(COLOR_GOLD, 0.85f * (1f - progress))
+        canvas.drawCircle(x, y, r, strengthPaint)
+
+        // L'onde s'anime alors que rien d'autre ne change : elle doit demander ses propres images.
+        postInvalidateOnAnimation()
     }
 
     /**
@@ -197,7 +257,7 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     private fun colorFor(gesture: GestureType): Int = when (gesture) {
-        GestureType.PINCH -> COLOR_GOLD
+        GestureType.PINCH, GestureType.PINKY_UP, GestureType.ROCK -> COLOR_GOLD
         GestureType.FIST, GestureType.THUMB_UP -> COLOR_RED
         GestureType.TWO_FINGER, GestureType.THREE_FINGER -> COLOR_BLUE
         else -> COLOR_CYAN
@@ -207,6 +267,9 @@ class CursorOverlayView(context: Context) : View(context) {
         Color.argb((alpha * 255).toInt().coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
 
     private companion object {
+        /** Durée de l'onde de confirmation : assez longue pour être vue, assez brève pour ne pas gêner. */
+        const val TAP_RIPPLE_MS = 320f
+
         const val COLOR_CYAN = 0xFF00F0FF.toInt()
         const val COLOR_GOLD = 0xFFFFB703.toInt()
         const val COLOR_RED = 0xFFFF0055.toInt()

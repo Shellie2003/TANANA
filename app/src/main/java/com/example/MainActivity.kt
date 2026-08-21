@@ -89,7 +89,8 @@ class MainActivity : ComponentActivity() {
                             latencyMs = state?.latencyMs ?: 0,
                             visionError = state?.visionError,
                             powerMode = state?.powerMode ?: PowerMode.IDLE,
-                            savingsRatio = state?.savingsRatio ?: 0f
+                            savingsRatio = state?.savingsRatio ?: 0f,
+                            click = StarkVisionService.clickTelemetry
                         )
                         delay(200)
                     }

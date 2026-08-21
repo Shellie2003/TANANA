@@ -10,10 +10,11 @@ import kotlin.math.hypot
  *
  * ## Le clic
  *
- * Le clic est une **impulsion du pouce** : un aller-retour bref vers l'index, détecté par sa
- * vitesse de fermeture et non par une position. Voir [ClickDetector] pour le raisonnement complet.
- * Il part en moins de 100 ms, ne se déclenche jamais sur un pouce au repos, et ne déplace pas la
- * cible puisque le curseur suit l'index, qui ne bouge pas.
+ * Le clic est un **contact bref du pouce sur l'index**, jugé non pas à une distance absolue mais
+ * à la course propre de l'utilisateur, apprise en continu. Voir [ClickDetector] pour le choix du
+ * geste et le détail de la mesure. Il ne se déclenche jamais sur un pouce au repos, quelle que
+ * soit la morphologie de la main, et ne déplace pas la cible puisque le curseur suit l'index,
+ * qui ne bouge pas.
  *
  * Maintenir le pouce fermé prolonge le geste en glisser ou en appui long, sans rien à apprendre
  * de plus.
@@ -82,6 +83,47 @@ class GesturePolicy(
 
     /** Progression du maintien du pouce, 0..1 : annonce la bascule du clic vers le glisser. */
     val holdProgress: Float get() = clickDetector.holdProgress
+
+    /** Progression de la fermeture en cours, 0..1 : alimente l'anneau du curseur. */
+    val clickProgress: Float get() = clickDetector.travelProgress
+
+    /**
+     * Instantané de l'état du clic, destiné à l'affichage.
+     *
+     * Rendre ces mesures visibles n'est pas un luxe de diagnostic : le clic gestuel est le seul
+     * geste dont l'échec est **silencieux et indiscernable d'une erreur de visée**. Sans retour,
+     * l'utilisateur ne peut ni corriger son geste ni faire confiance au système. Avec, il voit sa
+     * propre course, son taux de réussite, et la cause exacte de ce qui n'a pas marché.
+     */
+    data class ClickTelemetry(
+        val isCalibrated: Boolean = false,
+        /** Course pouce-index apprise pour cette main, en multiples de paume. */
+        val baseline: Float = 0f,
+        /** Seuil de contact courant, dérivé de la course. */
+        val contactThreshold: Float = 0f,
+        /** Progression de la fermeture en cours, 0..1. */
+        val progress: Float = 0f,
+        val clicks: Int = 0,
+        val rejected: Int = 0,
+        val lastRejection: ClickDetector.Rejection = ClickDetector.Rejection.NONE,
+        /** Durée de la dernière fermeture mesurée, en millisecondes. */
+        val lastCloseMs: Long = 0L
+    ) {
+        /** Part des gestes aboutis, ou null tant qu'aucun geste n'a été tenté. */
+        val successRate: Float?
+            get() = (clicks + rejected).takeIf { it > 0 }?.let { clicks.toFloat() / it }
+    }
+
+    fun clickTelemetry(): ClickTelemetry = ClickTelemetry(
+        isCalibrated = clickDetector.isCalibrated,
+        baseline = clickDetector.baseline.takeIf { !it.isNaN() } ?: 0f,
+        contactThreshold = clickDetector.contactThreshold,
+        progress = clickDetector.travelProgress,
+        clicks = clickDetector.clickCount,
+        rejected = clickDetector.rejectedCount,
+        lastRejection = clickDetector.lastRejection,
+        lastCloseMs = clickDetector.lastCloseDurationMs
+    )
 
     fun updateBindings(bindings: GestureBindings) {
         this.bindings = bindings

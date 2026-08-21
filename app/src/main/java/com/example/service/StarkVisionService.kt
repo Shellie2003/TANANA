@@ -343,7 +343,11 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             x = cursorX,
             y = cursorY,
             gesture = state.gesture,
-            pinchStrength = state.pinchStrength,
+            // L'anneau du curseur affiche la progression réelle du geste de clic, et non plus la
+            // force brute du pincement. C'est la même grandeur que celle qui déclenche l'appui :
+            // ce que l'utilisateur voit se remplir correspond donc exactement à ce qui décide.
+            clickProgress = policy.clickProgress,
+            holdProgress = policy.holdProgress,
             visible = state.isHandDetected && state.gesture != GestureType.IDLE
         )
 
@@ -364,11 +368,22 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             pinchRatio = state.pinchRatio
         )
 
+        clickTelemetry = policy.clickTelemetry()
+
         for (action in actions) {
             if (action is SystemAction.MoveCursor) continue
             if (action is SystemAction.ToggleKeyboard) {
                 toggleKeyboard()
                 continue
+            }
+            // Confirmation visuelle immédiate. Un appui gestuel n'a aucun retour tactile côté
+            // écran : sans onde, l'utilisateur ne sait pas si le clic est parti tant que
+            // l'application sous-jacente n'a pas réagi — et si elle ne réagit pas, il ne le sait
+            // jamais.
+            when (action) {
+                is SystemAction.Tap -> overlayView?.flashTap(action.x, action.y)
+                is SystemAction.LongPress -> overlayView?.flashTap(action.x, action.y)
+                else -> Unit
             }
             if (!StarkAccessibilityService.perform(action, screenWidth, screenHeight)) {
                 Log.i(TAG, "Service d'accessibilité inactif : $action ignorée")
@@ -422,6 +437,7 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         detachOverlay()
         isRunning = false
         latestState = null
+        clickTelemetry = GesturePolicy.ClickTelemetry()
     }
 
     companion object {
@@ -445,6 +461,18 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
          */
         @Volatile
         var latestState: HandGestureState? = null
+            private set
+
+        /**
+         * État courant du clic, publié pour l'écran de réglage.
+         *
+         * Le clic est le seul geste dont l'échec est silencieux : rien ne distingue, vu de
+         * l'utilisateur, un geste mal formé d'une cible manquée. Exposer la course apprise, le
+         * taux de réussite et la cause du dernier rejet est ce qui rend le geste corrigible — et
+         * donc ce qui permet de lui faire confiance.
+         */
+        @Volatile
+        var clickTelemetry: GesturePolicy.ClickTelemetry = GesturePolicy.ClickTelemetry()
             private set
 
         fun start(context: Context) {
