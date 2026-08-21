@@ -11,6 +11,7 @@ import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.control.SystemAction
+import com.example.control.TargetSnapper
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -255,6 +256,49 @@ class StarkAccessibilityService : AccessibilityService() {
         if (!dispatched) global(GLOBAL_ACTION_RECENTS)
     }
 
+    /**
+     * Rectangles des éléments cliquables de la fenêtre au premier plan, en pixels.
+     *
+     * Le parcours est borné en profondeur et en nombre de nœuds. Une hiérarchie de vues peut être
+     * profonde et large — une liste longue en compte des centaines — et ce parcours a lieu au
+     * moment du clic, sur le thread principal : une exploration exhaustive s'y verrait.
+     *
+     * Le parcours est itératif plutôt que récursif : la profondeur d'une hiérarchie de vues n'est
+     * pas bornée par construction, et une pile d'appels ne doit pas dépendre de ce qu'affiche
+     * l'application au premier plan.
+     */
+    private fun collectTargets(): List<TargetSnapper.Target> {
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return emptyList()
+
+        val targets = ArrayList<TargetSnapper.Target>(MAX_TARGETS)
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.addLast(root to 0)
+        var visited = 0
+        val bounds = android.graphics.Rect()
+
+        while (queue.isNotEmpty() && visited < MAX_NODES && targets.size < MAX_TARGETS) {
+            val (node, depth) = queue.removeFirst()
+            visited++
+
+            if (node.isClickable && node.isVisibleToUser && node.isEnabled) {
+                node.getBoundsInScreen(bounds)
+                targets += TargetSnapper.Target(
+                    bounds.left.toFloat(), bounds.top.toFloat(),
+                    bounds.right.toFloat(), bounds.bottom.toFloat()
+                )
+            }
+
+            if (depth < MAX_DEPTH) {
+                for (i in 0 until node.childCount) {
+                    val child = runCatching { node.getChild(i) }.getOrNull() ?: continue
+                    queue.addLast(child to depth + 1)
+                }
+            }
+        }
+
+        return targets
+    }
+
     private fun dispatch(path: Path, durationMs: Long): Boolean {
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
@@ -277,6 +321,12 @@ class StarkAccessibilityService : AccessibilityService() {
         /** Distance au bord inférieur pour la commutation rapide, en pixels. */
         private const val EDGE_MARGIN_PX = 2f
 
+        // Bornes du parcours de l'arbre d'accessibilité. Il a lieu au moment du clic, sur le
+        // thread principal : une exploration exhaustive d'une liste longue s'y verrait.
+        private const val MAX_NODES = 400
+        private const val MAX_DEPTH = 24
+        private const val MAX_TARGETS = 120
+
         @Volatile
         var instance: StarkAccessibilityService? = null
             private set
@@ -296,5 +346,41 @@ class StarkAccessibilityService : AccessibilityService() {
 
         /** Raccourci pour les actions globales sans géométrie. */
         fun perform(action: SystemAction): Boolean = perform(action, 1f, 1f)
+
+        /**
+         * Cible interactive vers laquelle aimanter un appui, en coordonnées écran normalisées,
+         * ou null s'il n'y en a aucune assez proche — l'appui doit alors partir exactement là où
+         * l'utilisateur a pointé.
+         *
+         * Retourne le rectangle complet et non son seul centre : l'appelant en a besoin pour
+         * *montrer* la cible retenue. Une aimantation invisible se comporterait comme un curseur
+         * qui ment, et détruirait la confiance qu'elle est censée créer.
+         */
+        fun snapTarget(
+            xNorm: Float,
+            yNorm: Float,
+            screenWidth: Float,
+            screenHeight: Float
+        ): TargetSnapper.Target? {
+            val service = instance ?: return null
+            if (screenWidth <= 0f || screenHeight <= 0f) return null
+
+            val targets = TargetSnapper.usable(
+                service.collectTargets(), screenWidth, screenHeight
+            )
+            val snapped = TargetSnapper.snap(
+                x = xNorm * screenWidth,
+                y = yNorm * screenHeight,
+                targets = targets,
+                radius = TargetSnapper.defaultRadius(screenWidth, screenHeight)
+            ) ?: return null
+
+            return TargetSnapper.Target(
+                left = snapped.left / screenWidth,
+                top = snapped.top / screenHeight,
+                right = snapped.right / screenWidth,
+                bottom = snapped.bottom / screenHeight
+            )
+        }
     }
 }

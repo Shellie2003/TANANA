@@ -383,18 +383,43 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
                 toggleKeyboard()
                 continue
             }
-            // Confirmation visuelle immédiate. Un appui gestuel n'a aucun retour tactile côté
-            // écran : sans onde, l'utilisateur ne sait pas si le clic est parti tant que
-            // l'application sous-jacente n'a pas réagi — et si elle ne réagit pas, il ne le sait
-            // jamais.
-            when (action) {
-                is SystemAction.Tap -> overlayView?.flashTap(action.x, action.y)
-                is SystemAction.LongPress -> overlayView?.flashTap(action.x, action.y)
-                else -> Unit
+
+            val resolved = snapToTarget(action)
+            if (!StarkAccessibilityService.perform(resolved, screenWidth, screenHeight)) {
+                Log.i(TAG, "Service d'accessibilité inactif : $resolved ignorée")
             }
-            if (!StarkAccessibilityService.perform(action, screenWidth, screenHeight)) {
-                Log.i(TAG, "Service d'accessibilité inactif : $action ignorée")
-            }
+        }
+    }
+
+    /**
+     * Ramène un appui sur la cible interactive la plus proche, et le confirme à l'écran.
+     *
+     * L'aimantation franchit la limite que le filtrage ne peut pas franchir : le tremblement de
+     * la main tendue couvre plusieurs millimètres, et aucun lissage ne rend un pointage aérien
+     * aussi précis qu'un doigt posé. Viser des objets plutôt que des pixels lève la contrainte.
+     *
+     * La cible retenue est dessinée : une aimantation invisible se comporterait comme un curseur
+     * qui ment. En la montrant, l'utilisateur voit ce qui a réellement été touché — et apprend
+     * du même coup jusqu'où il peut se permettre d'être approximatif.
+     */
+    private fun snapToTarget(action: SystemAction): SystemAction {
+        val (x, y) = when (action) {
+            is SystemAction.Tap -> action.x to action.y
+            is SystemAction.LongPress -> action.x to action.y
+            // Les autres actions n'ont pas de point d'application, ou en ont deux (un glisser) :
+            // il n'y a rien à aimanter.
+            else -> return action
+        }
+
+        val target = StarkAccessibilityService.snapTarget(x, y, screenWidth, screenHeight)
+        val px = target?.centerX ?: x
+        val py = target?.centerY ?: y
+        overlayView?.flashTap(px, py, target)
+
+        return when (action) {
+            is SystemAction.Tap -> SystemAction.Tap(px, py)
+            is SystemAction.LongPress -> SystemAction.LongPress(px, py)
+            else -> action
         }
     }
 

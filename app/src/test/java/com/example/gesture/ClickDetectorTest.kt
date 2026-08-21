@@ -1,7 +1,10 @@
 package com.example.gesture
 
 import org.junit.Assert.assertEquals
+import com.example.control.GesturePolicy
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -280,6 +283,33 @@ class ClickDetectorTest {
         val t0 = settle(d)
         play(d, tap() + tap(), startMs = t0)
         assertEquals(2, d.clickCount)
+    }
+
+    /**
+     * Chaque cause de rejet doit se traduire par une correction applicable. Un état sans conseil
+     * laisserait l'utilisateur devant un échec qu'il ne peut pas comprendre.
+     */
+    @Test
+    fun `chaque cause de rejet propose une correction`() {
+        ClickDetector.Rejection.entries.forEach { reason ->
+            val telemetry = GesturePolicy.ClickTelemetry(lastRejection = reason)
+            if (reason == ClickDetector.Rejection.NONE) {
+                assertNull("un geste abouti n'a pas à être commenté", telemetry.advice)
+            } else {
+                assertNotNull("$reason ne propose aucune correction", telemetry.advice)
+                assertTrue("$reason : conseil trop court", (telemetry.advice?.length ?: 0) > 40)
+            }
+        }
+    }
+
+    @Test
+    fun `le taux de reussite est inconnu avant tout geste`() {
+        assertNull(GesturePolicy.ClickTelemetry().successRate)
+        assertEquals(
+            0.75f,
+            GesturePolicy.ClickTelemetry(clicks = 3, rejected = 1).successRate!!,
+            1e-6f
+        )
     }
 
     @Test

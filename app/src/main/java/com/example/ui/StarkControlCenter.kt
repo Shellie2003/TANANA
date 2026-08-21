@@ -70,7 +70,6 @@ import com.example.control.BindableAction
 import com.example.control.ClickTuning
 import com.example.control.GestureBindings
 import com.example.control.GesturePolicy
-import com.example.gesture.ClickDetector
 import com.example.gesture.GestureType
 import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
@@ -517,7 +516,7 @@ private fun ClickCard(
                 Metric("Course", "%.2f".format(click.baseline), Modifier.weight(1f))
             }
 
-            val advice = adviceFor(click)
+            val advice = click.advice
             if (advice != null) {
                 Spacer(Modifier.height(12.dp))
                 Text(
@@ -571,26 +570,6 @@ private fun ClickCard(
             lineHeight = 14.sp
         )
     }
-}
-
-/**
- * Traduit la cause technique du dernier rejet en une correction que l'utilisateur peut appliquer.
- *
- * Afficher « TOO_SLOW » n'aiderait personne : ce qu'il faut dire, c'est quoi faire autrement.
- */
-private fun adviceFor(click: GesturePolicy.ClickTelemetry): String? = when (click.lastRejection) {
-    ClickDetector.Rejection.TOO_SHALLOW ->
-        "Votre pouce s'approche sans toucher l'index. Laissez-les se rejoindre franchement : " +
-            "le contact est ce qui déclenche l'appui, et il se sent au doigt."
-
-    ClickDetector.Rejection.TOO_SLOW ->
-        "Le mouvement est trop lent pour être distingué d'un repositionnement de la main. " +
-            "Frappez d'un coup sec plutôt que de refermer progressivement."
-
-    ClickDetector.Rejection.COOLDOWN ->
-        "Deux appuis très rapprochés ont été détectés ; le second a été ignoré."
-
-    ClickDetector.Rejection.NONE -> null
 }
 
 /** Description d'un geste dans l'aide-mémoire. */

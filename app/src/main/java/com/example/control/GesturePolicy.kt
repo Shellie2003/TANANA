@@ -112,6 +112,32 @@ class GesturePolicy(
         /** Part des gestes aboutis, ou null tant qu'aucun geste n'a été tenté. */
         val successRate: Float?
             get() = (clicks + rejected).takeIf { it > 0 }?.let { clicks.toFloat() / it }
+
+        /**
+         * Correction à proposer à l'utilisateur, ou null si le dernier geste a abouti.
+         *
+         * Traduit la cause technique du rejet en une action qu'il peut appliquer : afficher
+         * « TOO_SLOW » n'aiderait personne, ce qu'il faut dire c'est quoi faire autrement.
+         *
+         * Ce texte vit ici, et non dans l'écran qui l'affiche, pour qu'il soit couvert par les
+         * tests : c'est la seule phrase de l'application dont l'exactitude conditionne la capacité
+         * de l'utilisateur à se servir du geste le plus fréquent.
+         */
+        val advice: String?
+            get() = when (lastRejection) {
+                ClickDetector.Rejection.TOO_SHALLOW ->
+                    "Votre pouce s'approche sans toucher l'index. Laissez-les se rejoindre " +
+                        "franchement : le contact est ce qui déclenche l'appui, et il se sent au doigt."
+
+                ClickDetector.Rejection.TOO_SLOW ->
+                    "Le mouvement est trop lent pour être distingué d'un repositionnement de la " +
+                        "main. Frappez d'un coup sec plutôt que de refermer progressivement."
+
+                ClickDetector.Rejection.COOLDOWN ->
+                    "Deux appuis très rapprochés ont été détectés ; le second a été ignoré."
+
+                ClickDetector.Rejection.NONE -> null
+            }
     }
 
     fun clickTelemetry(): ClickTelemetry = ClickTelemetry(

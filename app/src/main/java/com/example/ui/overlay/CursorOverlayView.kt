@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.os.SystemClock
 import android.view.View
+import com.example.control.TargetSnapper
 import com.example.gesture.GestureType
 import com.example.input.RadialKeyboard
 import kotlin.math.PI
@@ -42,6 +43,7 @@ class CursorOverlayView(context: Context) : View(context) {
     private var tapX = 0f
     private var tapY = 0f
     private var tapAt = 0L
+    private var tapTarget: TargetSnapper.Target? = null
 
     private val density = resources.displayMetrics.density
 
@@ -110,16 +112,21 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     /**
-     * Déclenche l'onde de confirmation d'un appui.
+     * Déclenche l'onde de confirmation d'un appui, et le cadre de la cible aimantée s'il y en a une.
      *
      * Un appui gestuel ne produit aucun retour tactile. Si l'application sous-jacente ne réagit
      * pas visiblement — cible manquée, zone inerte — l'utilisateur n'a aucun moyen de savoir si
      * le clic est parti ou si son geste a été rejeté. L'onde lève cette ambiguïté, et c'est elle
      * qui distingue « j'ai mal visé » de « le geste n'a pas été reconnu ».
+     *
+     * Le cadre joue le même rôle pour l'aimantation. Ramener un appui sur une cible voisine sans
+     * le montrer se comporterait comme un curseur qui ment ; en le montrant, l'utilisateur voit ce
+     * qui a été touché et apprend jusqu'où il peut être approximatif.
      */
-    fun flashTap(x: Float, y: Float) {
+    fun flashTap(x: Float, y: Float, target: TargetSnapper.Target? = null) {
         tapX = x
         tapY = y
+        tapTarget = target
         tapAt = SystemClock.uptimeMillis()
         invalidate()
     }
@@ -192,6 +199,21 @@ class CursorOverlayView(context: Context) : View(context) {
         val x = tapX * width
         val y = tapY * height
         val r = (10f + 34f * progress) * density
+
+        // Cadre de la cible aimantée, tracé d'abord : il doit se lire sous l'onde, pas par-dessus.
+        tapTarget?.let { t ->
+            val fade = 0.75f * (1f - progress)
+            sectorPaint.color = withAlpha(COLOR_GOLD, 0.16f * (1f - progress))
+            canvas.drawRoundRect(
+                t.left * width, t.top * height, t.right * width, t.bottom * height,
+                8f * density, 8f * density, sectorPaint
+            )
+            strengthPaint.color = withAlpha(COLOR_GOLD, fade)
+            canvas.drawRoundRect(
+                t.left * width, t.top * height, t.right * width, t.bottom * height,
+                8f * density, 8f * density, strengthPaint
+            )
+        }
 
         haloPaint.color = withAlpha(COLOR_GOLD, 0.30f * (1f - progress))
         canvas.drawCircle(x, y, r, haloPaint)
