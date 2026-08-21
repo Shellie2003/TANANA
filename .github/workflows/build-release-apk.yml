@@ -1,4 +1,4 @@
-# Assemble le Stark HUD Launcher en deux variantes installables, signées avec la clé de debug.
+# Assemble NEXUS en deux variantes installables, signées avec la clé de debug.
 name: APK installables (signées debug)
 
 on:
@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      RELEASE_APK: stark-hud-launcher-release.apk
-      DEBUG_APK: stark-hud-launcher-debug.apk
+      RELEASE_APK: nexus-release.apk
+      DEBUG_APK: nexus-debug.apk
 
     steps:
       - name: Récupérer le dépôt
@@ -238,24 +238,27 @@ jobs:
           cat > notes.md <<NOTES
           Builds installables depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
 
-          | Fichier | Minifiée par R8 | Usage |
-          |---|---|---|
-          | \`$RELEASE_APK\` | oui | l'artefact réel |
-          | \`$DEBUG_APK\` | non | témoin de diagnostic |
+          | Fichier | Usage |
+          |---|---|
+          | \`$RELEASE_APK\` | l'artefact réel, à installer |
+          | \`$DEBUG_APK\` | témoin de diagnostic |
+
+          La minification est désactivée : elle privait la release du moteur de vision. Les deux
+          variantes ne diffèrent donc plus que par leur configuration de build.
 
           Les deux sont **signées avec la clé de debug** : installables pour tester, mais à ne
           jamais publier. Une vraie diffusion exige un keystore de release
           (\`KEYSTORE_PATH\`, \`KEY_ALIAS\`, \`STORE_PASSWORD\`, \`KEY_PASSWORD\`).
 
-          Si le suivi de main fonctionne avec la variante debug mais pas avec la release, la
-          cause est une règle de conservation R8 manquante : \`mapping-r8.txt\` rend la trace
-          de plantage lisible.
+          En cas de « moteur de vision indisponible », le message affiché dans l'application
+          porte la version d'Android, l'ABI et la taille de page de l'appareil : c'est ce qui
+          distingue un refus de chargement d'un échec d'initialisation.
           NOTES
 
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "Stark HUD Launcher — builds de test" \
+            --title "NEXUS — builds de test" \
             --prerelease \
             --notes-file notes.md
 

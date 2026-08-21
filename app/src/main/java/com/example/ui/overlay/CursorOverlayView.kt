@@ -195,7 +195,7 @@ class CursorOverlayView(context: Context) : View(context) {
     /** Onde de confirmation : un disque qui s'élargit et s'efface en un tiers de seconde. */
     private fun drawTapRipple(canvas: Canvas) {
         if (!tapVisible()) return
-        val progress = (SystemClock.uptimeMillis() - tapAt).toFloat() / TAP_RIPPLE_MS
+        val progress = (SystemClock.uptimeMillis() - tapAt).toFloat() / TAP_RIPPLE_MS.toFloat()
         val x = tapX * width
         val y = tapY * height
         val r = (10f + 34f * progress) * density
@@ -289,8 +289,13 @@ class CursorOverlayView(context: Context) : View(context) {
         Color.argb((alpha * 255).toInt().coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
 
     private companion object {
-        /** Durée de l'onde de confirmation : assez longue pour être vue, assez brève pour ne pas gêner. */
-        const val TAP_RIPPLE_MS = 320f
+        /**
+         * Durée de l'onde de confirmation : assez longue pour être vue, assez brève pour ne pas
+         * gêner. Exprimée en Long, comme l'horloge à laquelle elle est comparée — la comparaison
+         * d'un Long à un Float est légale en Kotlin mais force une conversion implicite dans une
+         * expression lue à chaque image.
+         */
+        const val TAP_RIPPLE_MS = 320L
 
         const val COLOR_CYAN = 0xFF00F0FF.toInt()
         const val COLOR_GOLD = 0xFFFFB703.toInt()
