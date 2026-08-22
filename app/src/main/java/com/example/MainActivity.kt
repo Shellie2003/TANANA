@@ -111,7 +111,7 @@ class MainActivity : ComponentActivity() {
                         bindings = bindings,
                         clickTuning = clickTuning,
                         onToggleEngine = ::toggleEngine,
-                        onClickTuningChange = ::setClickTuning,
+                        onClickTuningChange = ::applyClickTuning,
                         onLaunchApp = ::launchApp,
                         onRebind = ::rebind
                     )
@@ -233,7 +233,7 @@ class MainActivity : ComponentActivity() {
      * relancer est ce qui rend le changement perceptible tout de suite, au moment même où
      * l'utilisateur va l'essayer.
      */
-    private fun setClickTuning(tuning: ClickTuning) {
+    private fun applyClickTuning(tuning: ClickTuning) {
         clickTuning = tuning
         bindingsStore.saveClickTuning(tuning)
         if (StarkVisionService.isRunning) StarkVisionService.start(this)
