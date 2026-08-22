@@ -1,5 +1,5 @@
-# Assemble NEXUS en deux variantes installables, signées avec la clé de debug.
-name: APK installables (signées debug)
+# Assemble NEXUS en une APK installable, signée avec la clé de debug.
+name: APK installable (signée debug)
 
 on:
   push:
@@ -25,7 +25,6 @@ jobs:
     timeout-minutes: 45
     env:
       RELEASE_APK: nexus-release.apk
-      DEBUG_APK: nexus-debug.apk
 
     steps:
       - name: Récupérer le dépôt
@@ -67,15 +66,23 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      # Deux variantes, parce qu'elles répondent à deux questions différentes :
-      #  - release : minifiée par R8, c'est l'artefact réel ;
-      #  - debug   : sans minification, sert de témoin. Si le suivi de main marche en debug mais
-      #              pas en release, la cause est une règle de conservation R8 manquante.
+      # Une seule variante.
+      #
+      # Le build produisait aussi une APK debug, qui servait de témoin : le moteur de vision
+      # fonctionnait en debug et échouait en release, et comme les deux variantes ne différaient
+      # que par R8, l'écart entre elles désignait la cause. La minification étant désormais
+      # désactivée, les deux archives sont fonctionnellement identiques : la seconde ne répond
+      # plus à aucune question et doublait la durée du build.
+      #
+      # Si la minification est réactivée, rétablir `assembleDebug` et la comparaison des dex
+      # supprimée plus bas : c'est le seul garde-fou contre une classe retirée par R8, un défaut
+      # qui ne produit aucune erreur de compilation.
+      #
       # starkDebugSigning signe la release avec la clé de debug pour la rendre installable.
-      - name: Assembler les APK
-        run: ./gradlew assembleRelease assembleDebug -PstarkDebugSigning=true
+      - name: Assembler l'APK
+        run: ./gradlew assembleRelease -PstarkDebugSigning=true
 
-      - name: Vérifier que les APK sont signées
+      - name: Vérifier que l'APK est signée
         run: |
           set -euo pipefail
 
@@ -98,12 +105,9 @@ jobs:
           }
 
           release=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
-          debug=$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)
-          check "$release" "release (minifiée)"
-          check "$debug" "debug (non minifiée)"
+          check "$release" "release"
 
           cp "$release" "$RELEASE_APK"
-          cp "$debug" "$DEBUG_APK"
 
       # Diagnostic d'empaquetage. Un « module de vision indisponible » sur appareil a trois
       # causes possibles, que cette étape distingue sans avoir besoin du téléphone :
@@ -142,46 +146,6 @@ jobs:
           for lib in sorted(libs):
               print(f"  {lib}")
           PY
-
-          # Vérification anti-régression de la minification.
-          #
-          # Le moteur de vision a fonctionné en debug et échoué en release pendant plusieurs
-          # itérations : les deux variantes ne diffèrent que par R8, qui supprimait ou renommait
-          # des classes que seul le code natif référence. Rien ne le signale à la compilation.
-          #
-          # Le critère est comparatif, et non absolu : exiger la présence d'un symbole dans
-          # l'archive minifiée produit de faux positifs, car certaines dépendances — TensorFlow
-          # Lite par exemple — vivent dans les bibliothèques natives et n'ont aucune classe Java.
-          # Ce qui compte est donc l'écart : un symbole présent en debug et absent en release est
-          # une classe que la minification a retirée.
-          echo "## Effet de R8 sur les classes critiques"
-          stripped=0
-          for symbol in \
-            "com/google/mediapipe/tasks/vision/handlandmarker/HandLandmarker" \
-            "com/google/mediapipe/tasks/core/BaseOptions" \
-            "com/google/mediapipe/framework/image/BitmapImageBuilder" \
-            "AutoValue_HandLandmarker" \
-            "com/google/protobuf" \
-            "org/tensorflow/lite"
-          do
-            in_debug=no
-            in_release=no
-            unzip -p "$DEBUG_APK" 'classes*.dex' | grep -aqF "$symbol" && in_debug=yes
-            unzip -p "$RELEASE_APK" 'classes*.dex' | grep -aqF "$symbol" && in_release=yes
-
-            if [ "$in_debug" = yes ] && [ "$in_release" = no ]; then
-              echo "::error::$symbol retiré par la minification (présent en debug, absent en release)."
-              stripped=$((stripped + 1))
-            elif [ "$in_debug" = no ]; then
-              echo "  hors dex (code natif) : $symbol"
-            else
-              echo "  conservé : $symbol"
-            fi
-          done
-          if [ "$stripped" -gt 0 ]; then
-            echo "::error::$stripped classe(s) supprimée(s) par R8. Le moteur de vision échouera en release."
-            exit 1
-          fi
 
           echo "## Alignement des segments ELF (16 Ko requis sur Android 15+)"
           work=$(mktemp -d)
@@ -222,31 +186,25 @@ jobs:
       #
       # Le tag est glissant : il est supprimé puis recréé sur le commit courant à chaque build,
       # ce qui garde une adresse de téléchargement permanente pour la dernière version.
-      - name: Publier les APK dans la release
+      - name: Publier l'APK dans la release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: unsigned-latest
         run: |
           set -euo pipefail
 
-          assets=("$RELEASE_APK" "$DEBUG_APK")
+          assets=("$RELEASE_APK")
           if [ -f app/build/outputs/mapping/release/mapping.txt ]; then
             cp app/build/outputs/mapping/release/mapping.txt mapping-r8.txt
             assets+=("mapping-r8.txt")
           fi
 
           cat > notes.md <<NOTES
-          Builds installables depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
+          Build installable depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
 
-          | Fichier | Usage |
-          |---|---|
-          | \`$RELEASE_APK\` | l'artefact réel, à installer |
-          | \`$DEBUG_APK\` | témoin de diagnostic |
+          L'APK à installer est \`$RELEASE_APK\`.
 
-          La minification est désactivée : elle privait la release du moteur de vision. Les deux
-          variantes ne diffèrent donc plus que par leur configuration de build.
-
-          Les deux sont **signées avec la clé de debug** : installables pour tester, mais à ne
+          Elle est **signée avec la clé de debug** : installable pour tester, mais à ne
           jamais publier. Une vraie diffusion exige un keystore de release
           (\`KEYSTORE_PATH\`, \`KEY_ALIAS\`, \`STORE_PASSWORD\`, \`KEY_PASSWORD\`).
 
@@ -270,7 +228,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### APK release non signée"
+            echo "### APK installable"
             echo ""
             echo "| Élément | Valeur |"
             echo "|---|---|"
