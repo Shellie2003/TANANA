@@ -330,6 +330,28 @@ class CursorOverlayView(context: Context) : View(context) {
 
     private companion object {
         /**
+         * Épaisseur du contour sombre débordant de chaque côté d'un trait clair.
+         *
+         * Le curseur est dessiné dans une fenêtre de superposition : il ne peut pas lire les
+         * pixels qui se trouvent sous lui — il faudrait capturer l'écran à la cadence de la
+         * caméra, ce qui serait coûteux et indiscret — et ne peut donc pas s'accorder à la
+         * couleur du fond. Le halo translucide qui en tenait lieu ne ressortait que sur fond
+         * sombre et disparaissait sur un fond clair.
+         *
+         * Le double tracé résout le problème sans rien savoir du fond : chaque forme claire est
+         * cernée d'un contour sombre. Un fond quelconque est soit plus clair que le contour, soit
+         * plus sombre que la forme — dans les deux cas, l'un des deux tranche.
+         */
+        const val OUTLINE_DP = 1.6f
+        const val RING_WIDTH_DP = 2.5f
+        const val CROSS_WIDTH_DP = 2.4f
+        const val ARC_WIDTH_DP = 3f
+
+        /** Noir et blanc opaques : les deux seules couleurs qui ne dépendent d'aucun contexte. */
+        const val COLOR_OUTLINE = 0xE6000000.toInt()
+        const val COLOR_CORE = 0xFFFFFFFF.toInt()
+
+        /**
          * Durée de l'onde de confirmation : assez longue pour être vue, assez brève pour ne pas
          * gêner. Exprimée en Long, comme l'horloge à laquelle elle est comparée — la comparaison
          * d'un Long à un Float est légale en Kotlin mais force une conversion implicite dans une
