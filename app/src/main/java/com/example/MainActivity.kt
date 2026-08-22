@@ -20,7 +20,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.toBitmap
 import com.example.control.BindableAction
 import com.example.control.BindingsStore
 import com.example.control.ClickTuning
@@ -30,16 +29,19 @@ import com.example.power.PowerMode
 import com.example.service.StarkAccessibilityService
 import com.example.service.StarkVisionService
 import com.example.ui.EngineStatus
-import com.example.ui.LauncherAppItem
 import com.example.ui.SetupStep
 import com.example.ui.StarkControlCenter
 import com.example.ui.theme.StarkHUDTheme
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 
 /**
- * Écran principal : centre de contrôle et lanceur d'applications.
+ * Écran de configuration du contrôleur gestuel.
+ *
+ * NEXUS n'est pas un lanceur. Il l'a été, et c'était une erreur de périmètre : présenter une
+ * grille d'applications en faisait un candidat au rôle d'écran d'accueil, ce qui entrait en
+ * conflit avec le lanceur de l'utilisateur et rendait ambiguë l'action « Accueil » du contrôle
+ * gestuel — elle pouvait ramener sur NEXUS lui-même. L'écran ne sert donc plus qu'à configurer,
+ * allumer et observer le contrôleur.
  *
  * L'activité ne pilote plus la caméra elle-même. Toute la vision vit désormais dans
  * [StarkVisionService], pour deux raisons : le contrôle gestuel doit survivre à la sortie de
@@ -56,7 +58,6 @@ class MainActivity : ComponentActivity() {
     private var status by mutableStateOf(
         EngineStatus(false, GestureType.IDLE, 0f, 0, 0, null)
     )
-    private var apps by mutableStateOf<List<LauncherAppItem>>(emptyList())
     private lateinit var bindingsStore: BindingsStore
     private var bindings by mutableStateOf(GestureBindings())
     private var clickTuning by mutableStateOf(ClickTuning.DEFAULT)
@@ -99,20 +100,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                LaunchedEffect(Unit) {
-                    apps = withContext(Dispatchers.IO) { loadLauncherApps() }
-                }
-
                 Box(modifier = Modifier.fillMaxSize()) {
                     StarkControlCenter(
                         status = status,
                         setupSteps = buildSetupSteps(),
-                        apps = apps,
                         bindings = bindings,
                         clickTuning = clickTuning,
                         onToggleEngine = ::toggleEngine,
                         onClickTuningChange = ::applyClickTuning,
-                        onLaunchApp = ::launchApp,
                         onRebind = ::rebind
                     )
                 }
@@ -241,40 +236,5 @@ class MainActivity : ComponentActivity() {
 
     private fun toggleEngine(enabled: Boolean) {
         if (enabled) StarkVisionService.start(this) else StarkVisionService.stop(this)
-    }
-
-    private fun launchApp(target: String) {
-        runCatching {
-            packageManager.getLaunchIntentForPackage(target)?.let { intent ->
-                // Chaque application obtient sa propre tâche et apparaît donc dans les
-                // applications récentes ; RESET_TASK_IF_NEEDED ramène une tâche existante au
-                // premier plan au lieu de la redémarrer.
-                intent.addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                )
-                startActivity(intent)
-            }
-        }
-    }
-
-    /** Énumère les applications lançables. Opération d'E/S : à exécuter hors thread principal. */
-    private fun loadLauncherApps(): List<LauncherAppItem> {
-        val pm = packageManager
-        val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
-            addCategory(Intent.CATEGORY_LAUNCHER)
-        }
-        return pm.queryIntentActivities(mainIntent, 0)
-            .asSequence()
-            .filter { it.activityInfo.packageName != packageName }
-            .distinctBy { it.activityInfo.packageName }
-            .sortedBy { it.loadLabel(pm).toString().lowercase() }
-            .map { info ->
-                LauncherAppItem(
-                    label = info.loadLabel(pm).toString(),
-                    packageName = info.activityInfo.packageName,
-                    iconBitmap = runCatching { info.loadIcon(pm).toBitmap(96, 96) }.getOrNull()
-                )
-            }
-            .toList()
     }
 }

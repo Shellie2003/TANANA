@@ -31,9 +31,6 @@ enum class GestureType {
     /** Pouce seul tendu. Accueil. */
     THUMB_UP,
 
-    /** Pouce et index joints. Clic, et glisser tant que le pincement est maintenu. */
-    PINCH,
-
     /**
      * Auriculaire seul tendu. Se distingue de toutes les autres poses par un doigt entier, ce qui
      * en fait un signe franc malgré son apparente discrétion.
@@ -62,23 +59,12 @@ data class GestureResult(
     val isNewPose: Boolean = false,
     /** Confiance globale 0..1 (qualité géométrique x stabilité temporelle). */
     val confidence: Float = 0f,
-    /** Force du pincement 0..1 (1 = doigts joints), utilisable comme valeur analogique. */
-    val pinchStrength: Float = 0f,
     /** Vrai uniquement sur la frame où un balayage est émis. */
     val isSwipeEvent: Boolean = false
 )
 
 /** Seuils du classifieur. Extraits en data class pour être ajustables et testables. */
 data class GestureConfig(
-    // Pincement : deux seuils formant un trigger de Schmitt.
-    val pinchEnterRatio: Float = 0.34f,
-    val pinchExitRatio: Float = 0.48f,
-    /**
-     * Le pincement exige désormais que l'index soit tendu. Sans cette condition, le pouce au
-     * repos près de l'index — position naturelle du pointage — était classé comme un pincement :
-     * c'était la principale source de clics involontaires.
-     */
-    val pinchRequiresExtendedIndex: Float = 0.55f,
     // Nombre de frames consécutives requises pour valider un changement de pose.
     val framesToLatch: Int = 3,
     // Balayage.
@@ -109,8 +95,7 @@ data class GestureConfig(
  *  2. **Verrou temporel** — une pose ne bascule qu'après N frames cohérentes. Le coût, environ
  *     100 ms, est imperceptible ; sans lui, les poses intermédiaires traversées en changeant de
  *     geste déclencheraient des actions parasites.
- *  3. **Trigger de Schmitt sur le pincement** — seuils d'entrée et de sortie distincts.
- *  4. **Filtrage par qualité** — les poses géométriquement invraisemblables sont ignorées.
+ *  3. **Filtrage par qualité** — les poses géométriquement invraisemblables sont ignorées.
  *
  * Kotlin pur, sans dépendance Android : entièrement testable en JVM.
  */
@@ -126,35 +111,16 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
     var poseMargin: Float = 0f
         private set
 
-    private var pinchActive = false
-
     private val historyTimes = ArrayDeque<Long>()
     private val historyX = ArrayDeque<Float>()
     private val historyY = ArrayDeque<Float>()
     private var lastSwipeTime = Long.MIN_VALUE
     private var lastSeenTime = Long.MIN_VALUE
 
-    /** Position du curseur au moment où le pincement s'est refermé, pour un glisser stable. */
-    var pinchAnchorX: Float = 0f
-        private set
-    var pinchAnchorY: Float = 0f
-        private set
-
-    /** Vrai sur la seule frame où le pincement se referme (front montant = clic). */
-    var pinchJustClosed: Boolean = false
-        private set
-
-    /** Vrai sur la seule frame où le pincement se rouvre (front descendant = relâchement). */
-    var pinchJustOpened: Boolean = false
-        private set
-
     fun reset() {
         latchedPose = GestureType.IDLE
         candidatePose = GestureType.IDLE
         candidateFrames = 0
-        pinchActive = false
-        pinchJustClosed = false
-        pinchJustOpened = false
         historyTimes.clear()
         historyX.clear()
         historyY.clear()
@@ -165,8 +131,6 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
      * [timestampMs] doit être monotone croissant.
      */
     fun update(metrics: HandMetrics?, timestampMs: Long): GestureResult {
-        pinchJustClosed = false
-        pinchJustOpened = false
         val previous = latchedPose
 
         if (metrics == null || metrics.quality < config.minQuality) {
@@ -177,11 +141,9 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
                 return GestureResult(
                     gesture = latchedPose,
                     previousGesture = previous,
-                    confidence = 0.3f,
-                    pinchStrength = if (pinchActive) 1f else 0f
+                    confidence = 0.3f
                 )
             }
-            if (pinchActive) pinchJustOpened = true
             reset()
             lastSeenTime = Long.MIN_VALUE
             return GestureResult(GestureType.IDLE, previous, isNewPose = previous != GestureType.IDLE)
@@ -201,24 +163,9 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
         val poseChanged = candidateFrames >= config.framesToLatch && latchedPose != candidatePose
         if (poseChanged) latchedPose = candidatePose
 
-        // Fronts du pincement, dérivés de la pose verrouillée.
-        val nowPinching = latchedPose == GestureType.PINCH
-        if (nowPinching && !pinchActive) {
-            pinchActive = true
-            pinchJustClosed = true
-            pinchAnchorX = metrics.pointerX
-            pinchAnchorY = metrics.pointerY
-        } else if (!nowPinching && pinchActive) {
-            pinchActive = false
-            pinchJustOpened = true
-        }
-
         // Balayage : seulement en pose à trois doigts, dédiée à la navigation entre applications.
         pushHistory(timestampMs, metrics.pointerX, metrics.pointerY)
         val swipe = detectSwipe(timestampMs, allowed = latchedPose == GestureType.THREE_FINGER)
-
-        val pinchStrength = (1f - (metrics.pinchRatio - 0.08f) /
-            (config.pinchExitRatio - 0.08f)).coerceIn(0f, 1f)
 
         // La confiance chute pendant une transition de pose : une action déclenchée à cet instant
         // serait probablement une pose intermédiaire mal interprétée.
@@ -229,7 +176,6 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
             previousGesture = previous,
             isNewPose = poseChanged || swipe != null,
             confidence = (metrics.quality * stability).coerceIn(0f, 1f),
-            pinchStrength = pinchStrength,
             isSwipeEvent = swipe != null
         )
     }
@@ -237,23 +183,18 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
     /**
      * Détermine la pose brute d'une frame.
      *
-     * Le pincement est traité à part : il ne se distingue pas par un décompte de doigts mais par
-     * la distance pouce-index, une dimension orthogonale aux autres poses. Il exige en outre que
-     * l'index soit tendu — sans quoi le pouce naturellement posé près de l'index pendant le
-     * pointage déclenchait des clics fantômes.
+     * **Le contact pouce-index ne produit plus de pose.** Il en produisait une — PINCH — et
+     * c'était un conflit direct avec le clic, qui est ce même contact : fermer le pouce pour
+     * cliquer faisait basculer la pose, donc changer de rôle en pleine action. Selon que le
+     * contact durait plus ou moins que le verrou temporel de trois images, le même geste partait
+     * en clic ou en glisser. Le contact est désormais lu uniquement par le détecteur de clic, à
+     * partir de la distance pouce-index, indépendamment de la pose.
      *
-     * Les autres poses sont départagées par score avec marge de rejet : une main ambiguë conserve
-     * la pose courante au lieu d'en inventer une.
+     * Les poses sont donc toutes départagées par score avec marge de rejet : une main ambiguë
+     * conserve la pose courante au lieu d'en inventer une.
      */
     private fun classifyPose(m: HandMetrics): GestureType {
         poseMargin = scorer.margin(m)
-
-        val pinchThreshold = if (pinchActive) config.pinchExitRatio else config.pinchEnterRatio
-        if (m.pinchRatio < pinchThreshold &&
-            m.fingerExtension[0] > config.pinchRequiresExtendedIndex
-        ) {
-            return GestureType.PINCH
-        }
 
         // null = observation ambiguë. On conserve la pose courante : c'est précisément ce
         // refus de trancher qui supprime les conflits entre signes voisins.

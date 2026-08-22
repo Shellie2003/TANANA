@@ -109,35 +109,24 @@ class GesturePolicyTest {
         assertEquals(0.8f, drag.toX, 1e-5f)
     }
 
-    // --- Pincement ----------------------------------------------------------------------------
+    // --- Glisser -------------------------------------------------------------------------------
 
+    /**
+     * Le glisser n'a plus de pose dédiée : c'est le clic maintenu. Une pose à laquelle on assigne
+     * explicitement « Glisser » doit malgré tout continuer de fonctionner, et se résoudre au
+     * relâchement de cette pose — quelle qu'elle soit.
+     */
     @Test
-    fun `un pincement maintenu immobile produit un appui long`() {
-        val p = policy()
-        p.onGesture(GestureType.PINCH, 0.4f, 0.6f, isNewPose = true, timestampMs = 0)
-        repeat(20) { p.onGesture(GestureType.PINCH, 0.4f, 0.6f, isNewPose = false, timestampMs = 33L * it) }
-        val actions = p.onGesture(GestureType.POINT, 0.4f, 0.6f, isNewPose = true, timestampMs = 900)
-        assertTrue(actions.any { it is SystemAction.LongPress })
-    }
-
-    @Test
-    fun `un pincement deplace produit un glisser`() {
-        val p = policy()
-        p.onGesture(GestureType.PINCH, 0.2f, 0.2f, isNewPose = true, timestampMs = 0)
-        p.onGesture(GestureType.PINCH, 0.5f, 0.5f, isNewPose = false, timestampMs = 33)
+    fun `une pose a laquelle on assigne le glisser se resout a son relachement`() {
+        val custom = GestureBindings().with(GestureType.OPEN_PALM, BindableAction.DRAG)
+        val p = policy(custom)
+        p.onGesture(GestureType.OPEN_PALM, 0.2f, 0.2f, isNewPose = true, timestampMs = 0)
+        p.onGesture(GestureType.OPEN_PALM, 0.5f, 0.5f, isNewPose = false, timestampMs = 33)
         val actions = p.onGesture(GestureType.POINT, 0.8f, 0.8f, isNewPose = true, timestampMs = 66)
 
         val drag = actions.filterIsInstance<SystemAction.Drag>().single()
         assertEquals(0.2f, drag.fromX, 1e-5f)
         assertEquals(0.8f, drag.toX, 1e-5f)
-    }
-
-    @Test
-    fun `un pincement bref et immobile produit un appui`() {
-        val p = policy()
-        p.onGesture(GestureType.PINCH, 0.4f, 0.6f, isNewPose = true, timestampMs = 0)
-        val actions = p.onGesture(GestureType.POINT, 0.4f, 0.6f, isNewPose = true, timestampMs = 100)
-        assertTrue(actions.any { it is SystemAction.Tap })
     }
 
     // --- Actions ponctuelles ------------------------------------------------------------------
@@ -219,6 +208,68 @@ class GesturePolicyTest {
         p.onGesture(GestureType.POINT, 0.5f, 0.9f, isNewPose = false, timestampMs = 33)
         val first = p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.9f, isNewPose = true, timestampMs = 66)
         assertTrue("un saut de défilement a été émis", first.none { it is SystemAction.Scroll })
+    }
+
+    // --- Défilement au coup sec de l'index ------------------------------------------------------
+
+    /** Rejoue une trajectoire en pose de pointage, pouce ouvert, et collecte les actions. */
+    private fun trace(
+        p: GesturePolicy,
+        points: List<Pair<Float, Float>>,
+        startMs: Long = 0L
+    ): List<SystemAction> {
+        val all = mutableListOf<SystemAction>()
+        var t = startMs
+        points.forEachIndexed { i, (x, y) ->
+            all += p.onGesture(GestureType.POINT, x, y, isNewPose = i == 0, timestampMs = t, pinchRatio = open)
+            t += 33
+        }
+        return all
+    }
+
+    private fun settle(x: Float, y: Float) = List(4) { x to y }
+
+    @Test
+    fun `un coup sec de l index vers le haut fait defiler`() {
+        val actions = trace(policy(), (0..4).map { 0.5f to 0.65f - it * 0.07f } + settle(0.5f, 0.37f))
+        val scroll = actions.filterIsInstance<SystemAction.Scroll>().singleOrNull()
+        assertTrue("aucun défilement émis", scroll != null)
+        assertTrue("la main monte, le contenu doit remonter : ${scroll!!.amount}", scroll.amount > 0f)
+    }
+
+    @Test
+    fun `un coup sec de l index vers la droite fait defiler horizontalement`() {
+        val actions = trace(policy(), (0..4).map { 0.35f + it * 0.07f to 0.5f } + settle(0.63f, 0.5f))
+        assertTrue(actions.any { it is SystemAction.ScrollHorizontal })
+        assertTrue(actions.none { it is SystemAction.Scroll })
+    }
+
+    /**
+     * La cohabitation est tout l'enjeu : le coup sec partage la pose du curseur. Viser doit
+     * continuer de ne faire que viser.
+     */
+    @Test
+    fun `deplacer le curseur ne fait pas defiler`() {
+        val actions = trace(policy(), (0..30).map { 0.5f to 0.65f - it * 0.011f })
+        assertTrue(actions.none { it is SystemAction.Scroll || it is SystemAction.ScrollHorizontal })
+        assertTrue(actions.any { it is SystemAction.MoveCursor })
+    }
+
+    /** Déplacer un élément saisi est ample et rapide : cela ne doit pas être lu comme un coup sec. */
+    @Test
+    fun `un glisser en cours ne declenche pas de defilement`() {
+        val p = policy()
+        var t = 0L
+        val actions = mutableListOf<SystemAction>()
+        actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f, true, t, open); t += 33
+        actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f, false, t, closed); t += 33
+        // Maintien jusqu'à la bascule en glisser.
+        repeat(20) { actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f, false, t, closed); t += 33 }
+        // Puis déplacement franc de l'élément saisi.
+        ((0..4).map { 0.5f to 0.65f - it * 0.07f } + settle(0.5f, 0.37f)).forEach { (x, y) ->
+            actions += p.onGesture(GestureType.POINT, x, y, false, t, closed); t += 33
+        }
+        assertTrue(actions.none { it is SystemAction.Scroll })
     }
 
     // --- Navigation ---------------------------------------------------------------------------

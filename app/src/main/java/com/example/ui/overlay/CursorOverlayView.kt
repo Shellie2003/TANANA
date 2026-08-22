@@ -49,18 +49,17 @@ class CursorOverlayView(context: Context) : View(context) {
 
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f * density
         pathEffect = DashPathEffect(floatArrayOf(10f * density, 6f * density), 0f)
     }
     private val crossPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 2f * density
         strokeCap = Paint.Cap.ROUND
     }
     private val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val strengthPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 3f * density
+        strokeCap = Paint.Cap.ROUND
     }
     private val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -149,47 +148,75 @@ class CursorOverlayView(context: Context) : View(context) {
 
         val cx = cursorX * width
         val cy = cursorY * height
-        val color = colorFor(gesture)
-        val radius = if (gesture == GestureType.PINCH) 20f * density else 28f * density
+        val accent = colorFor(gesture)
+        val radius = 26f * density
 
-        // Halo : rend le curseur repérable au-dessus d'un contenu clair comme sombre.
-        haloPaint.color = withAlpha(color, 0.14f)
-        canvas.drawCircle(cx, cy, radius * 1.5f, haloPaint)
-
-        ringPaint.color = color
+        // Anneau de la pose : contour sombre d'abord, couleur ensuite. Le contour déborde de
+        // chaque côté du trait coloré, ce qui le détache d'un fond clair comme d'un fond sombre.
         canvas.save()
         canvas.rotate(rotation, cx, cy)
+        ringPaint.color = COLOR_OUTLINE
+        ringPaint.strokeWidth = RING_WIDTH_DP * density + 2f * OUTLINE_DP * density
+        canvas.drawCircle(cx, cy, radius, ringPaint)
+        ringPaint.color = accent
+        ringPaint.strokeWidth = RING_WIDTH_DP * density
         canvas.drawCircle(cx, cy, radius, ringPaint)
         canvas.restore()
 
-        // Réticule.
-        crossPaint.color = color
+        // Réticule, en blanc plutôt qu'en couleur d'accent : c'est la partie qui désigne le point
+        // exact, elle doit être la plus lisible, et le blanc cerné de noir l'est partout.
         val gap = radius * 0.45f
         val arm = 10f * density
-        canvas.drawLine(cx - gap - arm, cy, cx - gap, cy, crossPaint)
-        canvas.drawLine(cx + gap, cy, cx + gap + arm, cy, crossPaint)
-        canvas.drawLine(cx, cy - gap - arm, cx, cy - gap, crossPaint)
-        canvas.drawLine(cx, cy + gap, cx, cy + gap + arm, crossPaint)
+        val arms = floatArrayOf(
+            cx - gap - arm, cy, cx - gap, cy,
+            cx + gap, cy, cx + gap + arm, cy,
+            cx, cy - gap - arm, cx, cy - gap,
+            cx, cy + gap, cx, cy + gap + arm
+        )
+        crossPaint.color = COLOR_OUTLINE
+        crossPaint.strokeWidth = CROSS_WIDTH_DP * density + 2f * OUTLINE_DP * density
+        canvas.drawLines(arms, crossPaint)
+        crossPaint.color = COLOR_CORE
+        crossPaint.strokeWidth = CROSS_WIDTH_DP * density
+        canvas.drawLines(arms, crossPaint)
 
-        corePaint.color = color
-        canvas.drawCircle(cx, cy, 3.5f * density, corePaint)
+        // Noyau : disque blanc opaque cerné de noir. C'est le seul élément dont la visibilité ne
+        // dépend d'aucune hypothèse sur le fond, et donc le repère de dernier recours.
+        corePaint.color = COLOR_OUTLINE
+        canvas.drawCircle(cx, cy, 5f * density, corePaint)
+        corePaint.color = COLOR_CORE
+        canvas.drawCircle(cx, cy, 3f * density, corePaint)
 
         // Arc de progression du clic. Tracé comme un arc et non comme un cercle plein : la part
         // parcourue est alors lisible d'un coup d'œil, alors qu'un simple changement de rayon ou
         // d'opacité ne dit pas à quelle distance du déclenchement on se trouve.
         if (clickProgress > 0.02f) {
-            strengthPaint.color = withAlpha(COLOR_GOLD, 0.35f + 0.65f * clickProgress)
-            val r = radius * 1.45f
-            canvas.drawArc(cx - r, cy - r, cx + r, cy + r, -90f, 360f * clickProgress, false, strengthPaint)
+            drawContrastedArc(canvas, cx, cy, radius * 1.45f, clickProgress, COLOR_GOLD)
         }
 
         // Second arc, à l'extérieur : la bascule du clic vers le glisser. Deux anneaux distincts
         // plutôt qu'un seul réutilisé, sans quoi on ne saurait pas lequel des deux se remplit.
         if (holdProgress > 0.02f) {
-            strengthPaint.color = withAlpha(COLOR_RED, 0.30f + 0.60f * holdProgress)
-            val r = radius * 1.85f
-            canvas.drawArc(cx - r, cy - r, cx + r, cy + r, -90f, 360f * holdProgress, false, strengthPaint)
+            drawContrastedArc(canvas, cx, cy, radius * 1.85f, holdProgress, COLOR_RED)
         }
+    }
+
+    /** Arc de progression doublé d'un contour sombre, lisible sur n'importe quel fond. */
+    private fun drawContrastedArc(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        r: Float,
+        progress: Float,
+        color: Int
+    ) {
+        val sweep = 360f * progress
+        strengthPaint.color = COLOR_OUTLINE
+        strengthPaint.strokeWidth = ARC_WIDTH_DP * density + 2f * OUTLINE_DP * density
+        canvas.drawArc(cx - r, cy - r, cx + r, cy + r, -90f, sweep, false, strengthPaint)
+        strengthPaint.color = color
+        strengthPaint.strokeWidth = ARC_WIDTH_DP * density
+        canvas.drawArc(cx - r, cy - r, cx + r, cy + r, -90f, sweep, false, strengthPaint)
     }
 
     /** Onde de confirmation : un disque qui s'élargit et s'efface en un tiers de seconde. */
@@ -208,16 +235,29 @@ class CursorOverlayView(context: Context) : View(context) {
                 t.left * width, t.top * height, t.right * width, t.bottom * height,
                 8f * density, 8f * density, sectorPaint
             )
+            // Contour sombre puis or : le cadre entoure une cible dont on ignore la couleur.
+            strengthPaint.color = withAlpha(COLOR_OUTLINE, fade)
+            strengthPaint.strokeWidth = ARC_WIDTH_DP * density + 2f * OUTLINE_DP * density
+            canvas.drawRoundRect(
+                t.left * width, t.top * height, t.right * width, t.bottom * height,
+                8f * density, 8f * density, strengthPaint
+            )
             strengthPaint.color = withAlpha(COLOR_GOLD, fade)
+            strengthPaint.strokeWidth = ARC_WIDTH_DP * density
             canvas.drawRoundRect(
                 t.left * width, t.top * height, t.right * width, t.bottom * height,
                 8f * density, 8f * density, strengthPaint
             )
         }
 
-        haloPaint.color = withAlpha(COLOR_GOLD, 0.30f * (1f - progress))
+        val fade = 1f - progress
+        haloPaint.color = withAlpha(COLOR_CORE, 0.22f * fade)
         canvas.drawCircle(x, y, r, haloPaint)
-        strengthPaint.color = withAlpha(COLOR_GOLD, 0.85f * (1f - progress))
+        strengthPaint.color = withAlpha(COLOR_OUTLINE, 0.85f * fade)
+        strengthPaint.strokeWidth = ARC_WIDTH_DP * density + 2f * OUTLINE_DP * density
+        canvas.drawCircle(x, y, r, strengthPaint)
+        strengthPaint.color = withAlpha(COLOR_GOLD, fade)
+        strengthPaint.strokeWidth = ARC_WIDTH_DP * density
         canvas.drawCircle(x, y, r, strengthPaint)
 
         // L'onde s'anime alors que rien d'autre ne change : elle doit demander ses propres images.
@@ -279,7 +319,7 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     private fun colorFor(gesture: GestureType): Int = when (gesture) {
-        GestureType.PINCH, GestureType.PINKY_UP, GestureType.ROCK -> COLOR_GOLD
+        GestureType.PINKY_UP, GestureType.ROCK -> COLOR_GOLD
         GestureType.FIST, GestureType.THUMB_UP -> COLOR_RED
         GestureType.TWO_FINGER, GestureType.THREE_FINGER -> COLOR_BLUE
         else -> COLOR_CYAN

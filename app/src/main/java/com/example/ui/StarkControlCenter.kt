@@ -1,7 +1,5 @@
 package com.example.ui
 
-import android.graphics.Bitmap
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,28 +16,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -57,12 +48,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
@@ -77,14 +65,6 @@ import com.example.ui.theme.StarkCyan
 import com.example.ui.theme.StarkDarkBg
 import com.example.ui.theme.StarkGold
 import com.example.ui.theme.StarkRed
-
-/** Une application lançable depuis la grille. */
-data class LauncherAppItem(
-    val label: String,
-    val packageName: String,
-    val iconBitmap: Bitmap? = null,
-    val fallbackIcon: ImageVector = Icons.Default.Android
-)
 
 /** Une étape de configuration, avec son état et son action de résolution. */
 data class SetupStep(
@@ -114,25 +94,21 @@ data class EngineStatus(
 /**
  * Écran principal.
  *
- * L'ancienne interface plaçait les applications sur un anneau en rotation : spectaculaire, mais
- * contraire à ce qu'on attend d'un launcher — cibles mouvantes, étiquettes qui se chevauchent,
- * profondeur simulée qui réduit certaines icônes à quelques pixels. Elle est remplacée par une
- * disposition verticale ordinaire, où chaque élément a une position stable et une taille de
- * cible confortable.
+ * Cet écran ne lance rien. Il a comporté une grille d'applications, retirée : NEXUS est un
+ * contrôleur, et lui faire tenir aussi le rôle de lanceur le mettait en concurrence avec l'écran
+ * d'accueil de l'utilisateur.
  *
  * L'ordre reflète la progression de l'utilisateur : d'abord ce qui bloque (la configuration),
- * puis l'interrupteur principal, puis l'aide-mémoire des gestes, enfin les applications.
+ * puis l'interrupteur principal, puis le réglage du clic, enfin l'aide-mémoire des gestes.
  */
 @Composable
 fun StarkControlCenter(
     status: EngineStatus,
     setupSteps: List<SetupStep>,
-    apps: List<LauncherAppItem>,
     bindings: GestureBindings,
     clickTuning: ClickTuning,
     onToggleEngine: (Boolean) -> Unit,
     onClickTuningChange: (ClickTuning) -> Unit,
-    onLaunchApp: (String) -> Unit,
     onRebind: (GestureType, BindableAction) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -167,7 +143,7 @@ fun StarkControlCenter(
         // La carte du clic vient avant l'aide-mémoire : c'est le geste le plus fréquent, le seul
         // dont l'échec soit silencieux, et donc celui dont l'utilisateur a besoin d'un retour.
         if (status.isRunning) {
-            item { SectionTitle("Clic", "Pouce contre index, d'un contact bref") }
+            item { SectionTitle("Clic", "Pouce contre index, d'un contact bref. Maintenu, il glisse.") }
             item { ClickCard(status.click, clickTuning, onClickTuningChange) }
         }
 
@@ -194,11 +170,6 @@ fun StarkControlCenter(
                 bindings = bindings,
                 onRebind = onRebind
             )
-        }
-
-        if (apps.isNotEmpty()) {
-            item { SectionTitle("Applications", "${apps.size} installées") }
-            item { AppGrid(apps = apps, onLaunch = onLaunchApp) }
         }
     }
 }
@@ -585,15 +556,12 @@ private data class GestureDoc(
 private val POSE_DOCS = listOf(
     GestureDoc(
         GestureType.POINT, Icons.Default.TouchApp, "Index seul",
-        "Index tendu, les autres doigts repliés", StarkCyan
-    ),
-    GestureDoc(
-        GestureType.PINCH, Icons.Default.CheckCircle, "Pouce + index joints",
-        "Maintenez le contact pour saisir et déplacer", StarkGold
+        "Déplace le curseur. Un coup sec vers le haut, le bas, la gauche ou la droite " +
+            "fait défiler. Pouce contre index : clic ; maintenu : glisser.", StarkCyan
     ),
     GestureDoc(
         GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur",
-        "Montez ou descendez la main pour faire défiler", StarkBlue
+        "Défilement continu, pour parcourir lentement et précisément", StarkBlue
     ),
     GestureDoc(
         GestureType.THREE_FINGER, Icons.Default.SwapHoriz, "Trois doigts",
@@ -765,65 +733,6 @@ private fun ActionPicker(
                 if (selected) {
                     Icon(Icons.Default.CheckCircle, null, tint = StarkCyan, modifier = Modifier.size(16.dp))
                 }
-            }
-        }
-    }
-}
-
-/**
- * Grille d'applications. Quatre colonnes, cibles de 56 dp : au-dessus du minimum de 48 dp
- * recommandé pour un appui au doigt, et atteignable au curseur gestuel sans viser au pixel.
- */
-@Composable
-private fun AppGrid(apps: List<LauncherAppItem>, onLaunch: (String) -> Unit) {
-    // Hauteur bornée : la grille vit dans une LazyColumn, qui ne peut pas mesurer un enfant
-    // de hauteur infinie.
-    val rows = (apps.size + 3) / 4
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height((rows * 92).dp.coerceAtMost(560.dp)),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        userScrollEnabled = false
-    ) {
-        items(apps, key = { it.packageName }) { app ->
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .clickable { onLaunch(app.packageName) }
-                    .padding(vertical = 8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color.White.copy(alpha = 0.06f))
-                        .padding(8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    val icon = app.iconBitmap
-                    if (icon != null) {
-                        Image(
-                            bitmap = icon.asImageBitmap(),
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Icon(app.fallbackIcon, null, tint = StarkCyan, modifier = Modifier.fillMaxSize())
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = app.label,
-                    color = Color.White.copy(alpha = 0.8f),
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
-                )
             }
         }
     }

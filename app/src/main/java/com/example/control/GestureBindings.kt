@@ -116,7 +116,6 @@ data class GestureBindings(
          */
         val CONFIGURABLE_POSES = listOf(
             GestureType.POINT,
-            GestureType.PINCH,
             GestureType.TWO_FINGER,
             GestureType.THREE_FINGER,
             GestureType.OPEN_PALM,
@@ -141,13 +140,19 @@ data class GestureBindings(
         /**
          * Les rôles continus vont aux poses les plus confortables à tenir ; les actions
          * ponctuelles, dont un déclenchement accidentel coûte le plus cher, aux poses les plus
-         * franches. Les deux poses ajoutées comblent les manques signalés à l'usage : le volet des
-         * réglages rapides — d'où se basculent données mobiles et Wi-Fi — et le clavier gestuel,
-         * qui n'avait jusqu'ici aucun geste pour l'ouvrir.
+         * franches.
+         *
+         * Aucune pose ne porte le glisser, et c'est délibéré : le glisser est le clic maintenu.
+         * Le contact pouce-index prolongé saisit l'élément visé et le suit ; il n'y a donc rien à
+         * apprendre de plus, et surtout aucune pose supplémentaire à distinguer. L'action
+         * « Glisser » reste assignable pour qui préfère un geste dédié.
+         *
+         * Les deux poses ajoutées comblent les manques signalés à l'usage : le volet des réglages
+         * rapides — d'où se basculent données mobiles et Wi-Fi — et le clavier gestuel, qui
+         * n'avait jusqu'ici aucun geste pour l'ouvrir.
          */
         val DEFAULTS: Map<GestureType, BindableAction> = mapOf(
             GestureType.POINT to BindableAction.CURSOR,
-            GestureType.PINCH to BindableAction.DRAG,
             GestureType.TWO_FINGER to BindableAction.SCROLL,
             GestureType.THREE_FINGER to BindableAction.RECENTS,
             GestureType.OPEN_PALM to BindableAction.PLAY_PAUSE,

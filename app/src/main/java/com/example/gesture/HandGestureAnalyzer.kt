@@ -33,8 +33,6 @@ data class HandGestureState(
     val rawCursorX: Float = 0.5f,
     val rawCursorY: Float = 0.5f,
     val gesture: GestureType = GestureType.IDLE,
-    /** Force analogique du pincement, 0..1. */
-    val pinchStrength: Float = 0f,
     /**
      * Distance pouce-index normalisée par la taille de paume, brute.
      * Alimente la détection du clic par impulsion, qui raisonne sur sa dérivée.
@@ -53,8 +51,6 @@ data class HandGestureState(
     val isVisionUnavailable: Boolean = false,
     /** Cause de l'indisponibilité, affichée à l'écran pour rendre la panne diagnosticable. */
     val visionError: String? = null,
-    /** Front montant du pincement : une seule frame, à consommer comme un clic. */
-    val pinchClickTick: Long = 0L,
     /** Vrai sur la seule frame où la pose change : déclenche les actions ponctuelles. */
     val isNewPose: Boolean = false,
     /** Régime de cadence courant du moteur. */
@@ -153,7 +149,6 @@ class HandGestureAnalyzer(
     val savingsRatio: Float get() = frameGate.savingsRatio()
 
     private var isSimulationActive = false
-    private var pinchClickTick = 0L
     private var wasHandDetected = false
     private var lastIdleEmit = 0L
     private var visionUnavailableNotified = false
@@ -277,11 +272,10 @@ class HandGestureAnalyzer(
         val smoothed = cursorFilter.filter(xNormalized, yNormalized, 0.5f, now)
 
         val gesture = when {
-            isPinching -> GestureType.PINCH
+            isPinching -> GestureType.POINT
             isFist -> GestureType.FIST
             else -> GestureType.OPEN_PALM
         }
-        if (isPinching) pinchClickTick = now
 
         listener.onHandGestureUpdated(
             HandGestureState(
@@ -292,12 +286,10 @@ class HandGestureAnalyzer(
                 rawCursorX = xNormalized,
                 rawCursorY = yNormalized,
                 gesture = gesture,
-                pinchStrength = if (isPinching) 1f else 0f,
                 confidence = 1f,
                 fps = 60,
                 latencyMs = 0,
-                isSimulationMode = true,
-                pinchClickTick = pinchClickTick
+                isSimulationMode = true
             )
         )
     }
@@ -446,7 +438,6 @@ class HandGestureAnalyzer(
             return
         }
 
-        if (classifier.pinchJustClosed) pinchClickTick = now
         wasHandDetected = true
         // Réarme la pleine cadence : une main est là, la latence prime désormais sur l'énergie.
         frameGate.onHandDetected(now)
@@ -463,7 +454,6 @@ class HandGestureAnalyzer(
                 rawCursorX = metrics.pointerX,
                 rawCursorY = metrics.pointerY,
                 gesture = gestureResult.gesture,
-                pinchStrength = gestureResult.pinchStrength,
                 pinchRatio = metrics.pinchRatio,
                 confidence = gestureResult.confidence,
                 isNewPose = gestureResult.isNewPose,
@@ -474,7 +464,6 @@ class HandGestureAnalyzer(
                 fps = currentFps,
                 latencyMs = smoothedLatencyMs.toInt(),
                 isSimulationMode = false,
-                pinchClickTick = pinchClickTick
             )
         )
     }
@@ -498,7 +487,6 @@ class HandGestureAnalyzer(
                 gesture = GestureType.IDLE,
                 fps = currentFps,
                 latencyMs = smoothedLatencyMs.toInt(),
-                pinchClickTick = pinchClickTick,
                 powerMode = frameGate.mode,
                 savingsRatio = frameGate.savingsRatio()
             )

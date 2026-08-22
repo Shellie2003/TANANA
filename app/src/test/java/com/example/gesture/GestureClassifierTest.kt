@@ -64,10 +64,31 @@ class GestureClassifierTest {
         assertEquals(GestureType.THUMB_UP, result.gesture)
     }
 
+    /**
+     * Le contact pouce-index ne doit **pas** produire de pose. Il en produisait une, et c'était un
+     * conflit direct avec le clic : refermer le pouce pour cliquer changeait de rôle en pleine
+     * action, si bien que le même geste partait tantôt en clic, tantôt en glisser, selon qu'il
+     * durait plus ou moins que le verrou temporel. La main qui pointe reste donc la main qui
+     * pointe, pouce ouvert ou fermé.
+     */
     @Test
-    fun `pincement reconnu`() {
-        val (result, _) = feed(GestureClassifier(), SyntheticHand.pinching(), frames = 8)
-        assertEquals(GestureType.PINCH, result.gesture)
+    fun `le contact pouce-index ne change pas la pose`() {
+        val classifier = GestureClassifier()
+        val (ouvert, t) = feed(classifier, SyntheticHand.pointing(), frames = 8)
+        assertEquals(GestureType.POINT, ouvert.gesture)
+
+        var time = t
+        var dernier = ouvert
+        repeat(8) {
+            dernier = classifier.update(
+                SyntheticHand.metrics(
+                    SyntheticHand.build(extension = floatArrayOf(1f, 0f, 0f, 0f), pinchDistance = 0.08f)
+                ),
+                time
+            )
+            time += FRAME_MS
+        }
+        assertEquals(GestureType.POINT, dernier.gesture)
     }
 
     /**
@@ -75,7 +96,7 @@ class GestureClassifierTest {
      * Deux poses confondues rendraient leurs deux actions inutilisables.
      */
     @Test
-    fun `les sept poses sont mutuellement discriminables`() {
+    fun `les poses du vocabulaire sont mutuellement discriminables`() {
         val poses = mapOf(
             GestureType.POINT to SyntheticHand.pointing(),
             GestureType.TWO_FINGER to SyntheticHand.twoFingers(),
@@ -83,7 +104,8 @@ class GestureClassifierTest {
             GestureType.OPEN_PALM to SyntheticHand.openPalm(),
             GestureType.FIST to SyntheticHand.fist(),
             GestureType.THUMB_UP to SyntheticHand.thumbUp(),
-            GestureType.PINCH to SyntheticHand.pinching()
+            GestureType.PINKY_UP to SyntheticHand.pinkyUp(),
+            GestureType.ROCK to SyntheticHand.rock()
         )
 
         val observed = poses.mapValues { (_, hand) ->
@@ -140,45 +162,6 @@ class GestureClassifierTest {
             "poses intermédiaires verrouillées: $seen",
             GestureType.THREE_FINGER !in seen
         )
-    }
-
-    @Test
-    fun `oscillation autour du seuil ne genere pas de rafale de clics`() {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var clicks = 0
-
-        repeat(40) { i ->
-            val ratio = if (i % 2 == 0) 0.33f else 0.36f
-            classifier.update(HandGeometry.analyze(SyntheticHand.build(pinchDistance = ratio * 0.9f)), t)
-            if (classifier.pinchJustClosed) clicks++
-            t += FRAME_MS
-        }
-
-        assertTrue("clics parasites: $clicks", clicks <= 1)
-    }
-
-    @Test
-    fun `pincement franc produit exactement un clic et un relachement`() {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var clicks = 0
-        var releases = 0
-
-        repeat(10) { classifier.update(SyntheticHand.metrics(SyntheticHand.pointing()), t); t += FRAME_MS }
-        repeat(10) {
-            classifier.update(SyntheticHand.metrics(SyntheticHand.pinching()), t)
-            if (classifier.pinchJustClosed) clicks++
-            t += FRAME_MS
-        }
-        repeat(10) {
-            classifier.update(SyntheticHand.metrics(SyntheticHand.pointing()), t)
-            if (classifier.pinchJustOpened) releases++
-            t += FRAME_MS
-        }
-
-        assertEquals(1, clicks)
-        assertEquals(1, releases)
     }
 
     @Test
@@ -315,31 +298,25 @@ class GestureClassifierTest {
     @Test
     fun `perte breve de la main preserve le geste en cours`() {
         val classifier = GestureClassifier()
-        val (_, t) = feed(classifier, SyntheticHand.pinching(), frames = 8)
-        assertEquals(GestureType.PINCH, classifier.update(null, t + 100).gesture)
+        val (_, t) = feed(classifier, SyntheticHand.twoFingers(), frames = 8)
+        assertEquals(GestureType.TWO_FINGER, classifier.update(null, t + 100).gesture)
     }
 
     @Test
     fun `perte prolongee remet la machine a zero`() {
         val classifier = GestureClassifier()
-        val (_, t) = feed(classifier, SyntheticHand.pinching(), frames = 8)
+        val (_, t) = feed(classifier, SyntheticHand.twoFingers(), frames = 8)
         assertEquals(GestureType.IDLE, classifier.update(null, t + 3000).gesture)
     }
 
     @Test
-    fun `detection de faible qualite ne declenche aucune action`() {
+    fun `detection de faible qualite ne verrouille aucune pose`() {
         val classifier = GestureClassifier()
         val degraded = SyntheticHand.build(cx = 1.4f, scale = 0.02f, pinchDistance = 0.1f)
         var t = 0L
-        repeat(10) { classifier.update(HandGeometry.analyze(degraded), t); t += FRAME_MS }
-        assertTrue("un clic a été émis sur une détection douteuse", !classifier.pinchJustClosed)
-    }
-
-    @Test
-    fun `force de pincement croit quand les doigts se rapprochent`() {
-        val loose = GestureClassifier().update(SyntheticHand.metrics(SyntheticHand.openPalm()), 0)
-        val tight = GestureClassifier().update(SyntheticHand.metrics(SyntheticHand.pinching()), 0)
-        assertTrue(tight.pinchStrength > loose.pinchStrength)
+        var last = classifier.update(HandGeometry.analyze(degraded), t)
+        repeat(10) { t += FRAME_MS; last = classifier.update(HandGeometry.analyze(degraded), t) }
+        assertEquals("une pose a été verrouillée sur une détection douteuse", GestureType.IDLE, last.gesture)
     }
 
     @Test
