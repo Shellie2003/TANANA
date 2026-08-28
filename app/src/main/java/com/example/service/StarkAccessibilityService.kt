@@ -1,6 +1,7 @@
 package com.example.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.GestureResultCallback
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.graphics.Path
@@ -48,6 +49,8 @@ class StarkAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Le service disparaît : un trait resté ouvert laisserait un appui pendant sur l'écran.
+        abandonStroke()
         instance = null
     }
 
@@ -57,16 +60,32 @@ class StarkAccessibilityService : AccessibilityService() {
     private fun execute(action: SystemAction, width: Float, height: Float) {
         when (action) {
             is SystemAction.Tap -> tap(action.x * width, action.y * height)
-            is SystemAction.LongPress -> longPress(action.x * width, action.y * height)
+            is SystemAction.LongPress -> {
+                // Le maintien immobile s'est résolu en appui long : le trait diffusé, qui n'a
+                // fait que rester sur place, est abandonné au profit d'un appui franc.
+                strokeEnd()
+                longPress(action.x * width, action.y * height)
+            }
             is SystemAction.DoubleTap -> {
                 tap(action.x * width, action.y * height)
                 mainHandler.postDelayed({ tap(action.x * width, action.y * height) }, DOUBLE_TAP_GAP_MS)
             }
 
-            is SystemAction.Drag -> drag(
-                action.fromX * width, action.fromY * height,
-                action.toX * width, action.toY * height
-            )
+            // Le doigt se pose, suit la main, puis se lève. Si la diffusion continue est
+            // indisponible — Android 7, ou refus du système — `streaming` reste faux et le
+            // glisser complet émis au relâchement prend le relais.
+            is SystemAction.DragStart -> strokeBegin(action.x * width, action.y * height)
+            is SystemAction.DragMove -> strokeMoveTo(action.x * width, action.y * height)
+
+            is SystemAction.Drag ->
+                if (streaming) {
+                    strokeEnd()
+                } else {
+                    drag(
+                        action.fromX * width, action.fromY * height,
+                        action.toX * width, action.toY * height
+                    )
+                }
 
             is SystemAction.Scroll -> scroll(action.amount, width, height, vertical = true)
             is SystemAction.ScrollHorizontal -> scroll(action.amount, width, height, vertical = false)
@@ -113,8 +132,6 @@ class StarkAccessibilityService : AccessibilityService() {
 
             // Purement visuelles ou traitées ailleurs.
             is SystemAction.MoveCursor,
-            is SystemAction.DragStart,
-            is SystemAction.DragMove,
             SystemAction.ToggleKeyboard,
             SystemAction.None -> Unit
         }
@@ -299,6 +316,181 @@ class StarkAccessibilityService : AccessibilityService() {
         return targets
     }
 
+    // --- Geste continu ---------------------------------------------------------------------------
+
+    /**
+     * Trait en cours, quand le « doigt » est posé et suit la main.
+     *
+     * ## Pourquoi diffuser le geste plutôt que le synthétiser à la fin
+     *
+     * Le glisser était émis d'un bloc au relâchement : la main bougeait sans que rien ne se passe,
+     * puis la page sautait d'un coup. Cela suffisait à déplacer une icône, mais ne pouvait pas
+     * servir à faire défiler — sans retour pendant le mouvement, on ne sait pas où l'on s'arrête —
+     * et perdait l'inertie, qui est ce qui rend le défilement tactile agréable.
+     *
+     * En diffusant le trait segment par segment, le pointeur se comporte comme un doigt posé sur
+     * la vitre. **Rien n'a plus besoin d'être reconnu** : défilement, inertie, glisser-déposer,
+     * balayage pour écarter une notification, tirer le volet — tout cela est interprété par le
+     * système, avec sa propre physique, sans qu'aucun geste ne soit ajouté au vocabulaire.
+     *
+     * ## Contraintes, et ce qu'elles imposent
+     *
+     * `continueStroke` exige Android 8, et un segment ne peut être envoyé qu'une fois le précédent
+     * terminé — d'où la pompe pilotée par le rappel de fin plutôt qu'un envoi par image.
+     *
+     * La levée du doigt doit être garantie. Un trait laissé ouvert immobiliserait l'interface sous
+     * un appui permanent, ce qui est de loin le pire résultat possible ici. La demande de fin est
+     * donc mémorisée et honorée dès que la voie est libre, jamais abandonnée parce qu'un segment
+     * était en vol ; et un chien de garde ferme le trait si les rappels cessent d'arriver.
+     *
+     * Si la diffusion est indisponible ou refusée, [streaming] reste faux et l'appelant retombe
+     * sur le glisser synthétisé au relâchement, qui reste correct pour déplacer un élément.
+     */
+    private var activeStroke: GestureDescription.StrokeDescription? = null
+    private var strokeX = 0f
+    private var strokeY = 0f
+    private var pendingX = Float.NaN
+    private var pendingY = Float.NaN
+    private var dispatching = false
+    private var endRequested = false
+
+    /** Vrai tant qu'un trait continu est réellement en cours. */
+    private var streaming = false
+
+    private val strokeWatchdog = Runnable {
+        if (streaming) {
+            Log.w(TAG, "Trait continu sans rappel de fin : levée forcée")
+            abandonStroke()
+        }
+    }
+
+    private fun strokeBegin(x: Float, y: Float) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        abandonStroke()
+
+        strokeX = x
+        strokeY = y
+        pendingX = Float.NaN
+        pendingY = Float.NaN
+        endRequested = false
+
+        // Un trait de longueur nulle est refusé : on pose le doigt sur un segment imperceptible.
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x + 1f, y)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, STROKE_SEGMENT_MS, true)
+        streaming = true
+        if (!send(stroke)) {
+            streaming = false
+            return
+        }
+        armWatchdog()
+    }
+
+    private fun strokeMoveTo(x: Float, y: Float) {
+        if (!streaming) return
+        pendingX = x
+        pendingY = y
+        armWatchdog()
+        pumpStroke()
+    }
+
+    /** Demande la levée du doigt. Elle est honorée dès que la voie est libre. */
+    private fun strokeEnd() {
+        if (!streaming) return
+        endRequested = true
+        pumpStroke()
+    }
+
+    /** Abandonne le trait sans chercher à le clore proprement : dernier recours. */
+    private fun abandonStroke() {
+        mainHandler.removeCallbacks(strokeWatchdog)
+        streaming = false
+        endRequested = false
+        dispatching = false
+        activeStroke = null
+        pendingX = Float.NaN
+        pendingY = Float.NaN
+    }
+
+    private fun armWatchdog() {
+        mainHandler.removeCallbacks(strokeWatchdog)
+        mainHandler.postDelayed(strokeWatchdog, STROKE_WATCHDOG_MS)
+    }
+
+    /**
+     * Envoie le segment suivant, s'il y en a un et si le précédent est terminé.
+     *
+     * Une demande de fin est prioritaire sur un déplacement en attente : lever le doigt ne peut
+     * jamais être différé par un mouvement.
+     */
+    private fun pumpStroke() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!streaming || dispatching) return
+        val previous = activeStroke ?: return
+
+        val ending = endRequested
+        if (!ending && pendingX.isNaN()) return
+
+        // Cible du segment : la position en attente, ou la position courante décalée d'un pixel
+        // quand il s'agit seulement de lever le doigt — un segment de longueur nulle est refusé.
+        var targetX = if (pendingX.isNaN()) strokeX + 1f else pendingX
+        var targetY = if (pendingY.isNaN()) strokeY else pendingY
+        pendingX = Float.NaN
+        pendingY = Float.NaN
+
+        if (abs(targetX - strokeX) < 0.5f && abs(targetY - strokeY) < 0.5f) {
+            if (!ending) return
+            targetX = strokeX + 1f
+            targetY = strokeY
+        }
+
+        val path = Path().apply {
+            moveTo(strokeX, strokeY)
+            lineTo(targetX, targetY)
+        }
+        val stroke = runCatching {
+            previous.continueStroke(path, 0L, STROKE_SEGMENT_MS, !ending)
+        }.getOrNull() ?: run {
+            abandonStroke()
+            return
+        }
+
+        strokeX = targetX
+        strokeY = targetY
+        if (ending) {
+            endRequested = false
+            streaming = false
+            mainHandler.removeCallbacks(strokeWatchdog)
+        }
+        if (!send(stroke) && !ending) abandonStroke()
+    }
+
+    private fun send(stroke: GestureDescription.StrokeDescription): Boolean {
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val callback = object : GestureResultCallback() {
+            override fun onCompleted(description: GestureDescription?) {
+                dispatching = false
+                activeStroke = stroke
+                pumpStroke()
+            }
+
+            override fun onCancelled(description: GestureDescription?) {
+                dispatching = false
+                abandonStroke()
+            }
+        }
+
+        dispatching = true
+        activeStroke = stroke
+        val accepted = runCatching { dispatchGesture(gesture, callback, mainHandler) }
+            .onFailure { Log.w(TAG, "Trait continu refusé", it) }
+            .getOrDefault(false)
+        if (!accepted) dispatching = false
+        return accepted
+    }
+
     private fun dispatch(path: Path, durationMs: Long): Boolean {
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
@@ -317,6 +509,20 @@ class StarkAccessibilityService : AccessibilityService() {
         private const val MAX_DRAG_MS = 600L
         private const val SCROLL_DURATION_MS = 180L
         private const val QUICK_SWITCH_MS = 220L
+
+        /**
+         * Durée annoncée pour un segment de trait continu. Légèrement supérieure à l'intervalle
+         * entre deux images de la caméra : un segment plus court se terminerait avant l'arrivée
+         * du suivant, et le doigt serait perçu comme immobile entre les deux.
+         */
+        private const val STROKE_SEGMENT_MS = 40L
+
+        /**
+         * Délai au-delà duquel un trait sans nouvelle est fermé d'autorité. Un doigt resté posé
+         * immobiliserait l'interface : mieux vaut interrompre un geste légitime que laisser
+         * l'écran sous un appui permanent.
+         */
+        private const val STROKE_WATCHDOG_MS = 2000L
 
         /** Distance au bord inférieur pour la commutation rapide, en pixels. */
         private const val EDGE_MARGIN_PX = 2f

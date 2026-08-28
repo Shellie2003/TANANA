@@ -210,66 +210,60 @@ class GesturePolicyTest {
         assertTrue("un saut de défilement a été émis", first.none { it is SystemAction.Scroll })
     }
 
-    // --- Défilement au coup sec de l'index ------------------------------------------------------
-
-    /** Rejoue une trajectoire en pose de pointage, pouce ouvert, et collecte les actions. */
-    private fun trace(
-        p: GesturePolicy,
-        points: List<Pair<Float, Float>>,
-        startMs: Long = 0L
-    ): List<SystemAction> {
-        val all = mutableListOf<SystemAction>()
-        var t = startMs
-        points.forEachIndexed { i, (x, y) ->
-            all += p.onGesture(GestureType.POINT, x, y, isNewPose = i == 0, timestampMs = t, pinchRatio = open)
-            t += 33
-        }
-        return all
-    }
-
-    private fun settle(x: Float, y: Float) = List(4) { x to y }
-
-    @Test
-    fun `un coup sec de l index vers le haut fait defiler`() {
-        val actions = trace(policy(), (0..4).map { 0.5f to 0.65f - it * 0.07f } + settle(0.5f, 0.37f))
-        val scroll = actions.filterIsInstance<SystemAction.Scroll>().singleOrNull()
-        assertTrue("aucun défilement émis", scroll != null)
-        assertTrue("la main monte, le contenu doit remonter : ${scroll!!.amount}", scroll.amount > 0f)
-    }
-
-    @Test
-    fun `un coup sec de l index vers la droite fait defiler horizontalement`() {
-        val actions = trace(policy(), (0..4).map { 0.35f + it * 0.07f to 0.5f } + settle(0.63f, 0.5f))
-        assertTrue(actions.any { it is SystemAction.ScrollHorizontal })
-        assertTrue(actions.none { it is SystemAction.Scroll })
-    }
+    // --- Le doigt posé ---------------------------------------------------------------------------
 
     /**
-     * La cohabitation est tout l'enjeu : le coup sec partage la pose du curseur. Viser doit
-     * continuer de ne faire que viser.
+     * Le contact maintenu pose le doigt et le fait suivre la main. C'est ce flux continu qui
+     * remplace le défilement gestuel : rien n'est reconnu, c'est le système qui interprète — et
+     * il sait déjà faire défiler, lancer, glisser-déposer et balayer.
      */
     @Test
-    fun `deplacer le curseur ne fait pas defiler`() {
-        val actions = trace(policy(), (0..30).map { 0.5f to 0.65f - it * 0.011f })
-        assertTrue(actions.none { it is SystemAction.Scroll || it is SystemAction.ScrollHorizontal })
-        assertTrue(actions.any { it is SystemAction.MoveCursor })
-    }
-
-    /** Déplacer un élément saisi est ample et rapide : cela ne doit pas être lu comme un coup sec. */
-    @Test
-    fun `un glisser en cours ne declenche pas de defilement`() {
+    fun `le contact maintenu produit un flux continu de deplacement`() {
         val p = policy()
         var t = 0L
         val actions = mutableListOf<SystemAction>()
-        actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f, true, t, open); t += 33
-        actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f, false, t, closed); t += 33
-        // Maintien jusqu'à la bascule en glisser.
-        repeat(20) { actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f, false, t, closed); t += 33 }
-        // Puis déplacement franc de l'élément saisi.
-        ((0..4).map { 0.5f to 0.65f - it * 0.07f } + settle(0.5f, 0.37f)).forEach { (x, y) ->
-            actions += p.onGesture(GestureType.POINT, x, y, false, t, closed); t += 33
+        actions += p.onGesture(GestureType.POINT, 0.5f, 0.70f, true, t, open); t += 33
+        actions += p.onGesture(GestureType.POINT, 0.5f, 0.70f, false, t, closed); t += 33
+        repeat(15) { actions += p.onGesture(GestureType.POINT, 0.5f, 0.70f, false, t, closed); t += 33 }
+        // Le doigt est posé : la main remonte, le contenu doit suivre pas à pas.
+        (1..8).forEach { i ->
+            actions += p.onGesture(GestureType.POINT, 0.5f, 0.70f - i * 0.05f, false, t, closed)
+            t += 33
         }
-        assertTrue(actions.none { it is SystemAction.Scroll })
+        actions += p.onGesture(GestureType.POINT, 0.5f, 0.30f, false, t, open)
+
+        assertTrue("le doigt n'a pas été posé", actions.any { it is SystemAction.DragStart })
+        val moves = actions.filterIsInstance<SystemAction.DragMove>()
+        assertTrue("flux trop pauvre : ${moves.size} déplacements", moves.size >= 8)
+        assertTrue("le doigt n'a pas été levé", actions.any { it is SystemAction.Drag })
+    }
+
+    /** Tant que le doigt n'est pas posé, aucun déplacement ne doit partir. */
+    @Test
+    fun `deplacer le curseur sans contact ne produit aucun flux`() {
+        val actions = mutableListOf<SystemAction>()
+        val p = policy()
+        var t = 0L
+        (0..30).forEach { i ->
+            actions += p.onGesture(GestureType.POINT, 0.5f, 0.65f - i * 0.011f, i == 0, t, open)
+            t += 33
+        }
+        assertTrue(actions.none { it is SystemAction.DragMove || it is SystemAction.DragStart })
+        assertTrue(actions.any { it is SystemAction.MoveCursor })
+    }
+
+    /** Un contact bref reste un clic : il ne doit poser aucun doigt. */
+    @Test
+    fun `un clic bref ne pose pas le doigt`() {
+        val p = policy()
+        var t = 0L
+        val actions = mutableListOf<SystemAction>()
+        listOf(open, closed, open, open).forEach { ratio ->
+            actions += p.onGesture(GestureType.POINT, 0.5f, 0.5f, false, t, ratio)
+            t += 33
+        }
+        assertTrue(actions.any { it is SystemAction.Tap })
+        assertTrue(actions.none { it is SystemAction.DragStart })
     }
 
     // --- Navigation ---------------------------------------------------------------------------

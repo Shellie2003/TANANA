@@ -143,7 +143,7 @@ fun StarkControlCenter(
         // La carte du clic vient avant l'aide-mémoire : c'est le geste le plus fréquent, le seul
         // dont l'échec soit silencieux, et donc celui dont l'utilisateur a besoin d'un retour.
         if (status.isRunning) {
-            item { SectionTitle("Clic", "Pouce contre index, d'un contact bref. Maintenu, il glisse.") }
+            item { SectionTitle("Clic", "Contact bref : clic. Contact maintenu : le doigt se pose.") }
             item { ClickCard(status.click, clickTuning, onClickTuningChange) }
         }
 
@@ -556,8 +556,8 @@ private data class GestureDoc(
 private val POSE_DOCS = listOf(
     GestureDoc(
         GestureType.POINT, Icons.Default.TouchApp, "Index seul",
-        "Déplace le curseur. Un coup sec vers le haut, le bas, la gauche ou la droite " +
-            "fait défiler. Pouce contre index : clic ; maintenu : glisser.", StarkCyan
+        "Déplace le curseur. Pouce contre index : clic. Contact maintenu : le doigt se pose " +
+            "et suit la main — c'est ce qui fait défiler, glisser et balayer.", StarkCyan
     ),
     GestureDoc(
         GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur",

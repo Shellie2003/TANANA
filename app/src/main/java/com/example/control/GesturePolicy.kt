@@ -1,7 +1,6 @@
 package com.example.control
 
 import com.example.gesture.ClickDetector
-import com.example.gesture.FlickDetector
 import com.example.gesture.GestureType
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -40,12 +39,6 @@ class GesturePolicy(
     data class Config(
         /** Gain du défilement : un déplacement de main de f fait défiler f x scrollGain. */
         val scrollGain: Float = 1.6f,
-        /**
-         * Gain du défilement au coup sec. Plus élevé que celui du défilement continu : le geste
-         * est bref et ne se répète pas, il doit donc couvrir en une fois ce que le défilement
-         * continu couvre en plusieurs images.
-         */
-        val flickGain: Float = 2.4f,
         /** Déplacement minimal avant d'émettre un défilement, pour ignorer le tremblement. */
         val scrollThreshold: Float = 0.012f,
         /** Intervalle minimal entre deux actions ponctuelles identiques. */
@@ -77,7 +70,6 @@ class GesturePolicy(
 
     private val lastActionAt = HashMap<String, Long>()
     private var clickDetector = ClickDetector()
-    private val flickDetector = FlickDetector()
 
     // État du clic par immobilité.
     private var dwellX = 0f
@@ -180,7 +172,6 @@ class GesturePolicy(
         hasAnchor = false
         lastActionAt.clear()
         clickDetector.reset()
-        flickDetector.reset()
         resetDwell()
     }
 
@@ -245,14 +236,6 @@ class GesturePolicy(
                 actions += SystemAction.MoveCursor(cursorX, cursorY)
                 actions += click(pinchRatio, cursorX, cursorY, timestampMs)
                 dwell(cursorX, cursorY, timestampMs)?.let { actions += it }
-
-                // Le défilement partage la pose du curseur, et n'en est séparé que par la
-                // dynamique du mouvement. Il est suspendu pendant un maintien : déplacer un
-                // élément saisi est un geste ample et rapide, qui serait sinon lu comme un
-                // coup sec.
-                if (!clickDetector.isHolding) {
-                    flick(cursorX, cursorY, timestampMs)?.let { actions += it }
-                }
             }
 
             BindableAction.DRAG -> {
@@ -335,25 +318,13 @@ class GesturePolicy(
                 )
             }
 
-            ClickDetector.Event.NONE -> emptyList()
+            // Contact maintenu : le doigt est « posé » et suit la main. C'est ce flux continu qui
+            // fait défiler, faire glisser et balayer — sans qu'aucun de ces gestes ait besoin
+            // d'être reconnu, puisque c'est le système qui les interprète, exactement comme il le
+            // fait pour un doigt sur la vitre.
+            ClickDetector.Event.NONE ->
+                if (clickDetector.isHolding) listOf(SystemAction.DragMove(x, y)) else emptyList()
         }
-
-    /**
-     * Défilement au coup sec de l'index.
-     *
-     * Le sens suit la main, comme le défilement continu : monter la main fait remonter le
-     * contenu. Cohérence délibérée — deux gestes qui font la même chose ne doivent pas la faire
-     * dans deux sens opposés.
-     */
-    private fun flick(x: Float, y: Float, now: Long): SystemAction? {
-        val flick = flickDetector.update(x, y, now) ?: return null
-        val amount = -flick.delta * config.flickGain
-        return if (flick.horizontal) {
-            SystemAction.ScrollHorizontal(amount)
-        } else {
-            SystemAction.Scroll(amount)
-        }
-    }
 
     /**
      * Clic par immobilité.
