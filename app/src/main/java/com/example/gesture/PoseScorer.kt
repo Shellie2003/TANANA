@@ -30,8 +30,16 @@ class PoseScorer(private val config: Config = Config()) {
         val minMargin: Float = 0.12f,
         /** Score minimal absolu : une main qui ne ressemble à aucun modèle ne décide rien. */
         val minScore: Float = 0.62f,
-        /** Poids du pouce dans le score. Moins fiable que les doigts longs, donc minoré. */
-        val thumbWeight: Float = 0.6f
+        /**
+         * Poids du pouce dans le score.
+         *
+         * Il était minoré — le pouce est le doigt le moins bien suivi — mais c'était un mauvais
+         * calcul : le pouce est aussi le **seul** discriminant entre le poing et le pouce levé,
+         * et le minorer ramenait la marge de cette paire à 0,130, à peine au-dessus du seuil de
+         * rejet, sur une main pourtant parfaite. Sur une main réelle, cette paire oscillait donc
+         * en permanence. Relevé à 1, il porte cette marge à 0,200.
+         */
+        val thumbWeight: Float = 1.0f
     )
 
     /**
@@ -65,10 +73,7 @@ class PoseScorer(private val config: Config = Config()) {
     private val templates = listOf(
         Template(GestureType.POINT, 1f, 0f, 0f, 0f, null),
         Template(GestureType.TWO_FINGER, 1f, 1f, 0f, 0f, null),
-        Template(GestureType.THREE_FINGER, 1f, 1f, 1f, 0f, null),
         Template(GestureType.OPEN_PALM, 1f, 1f, 1f, 1f, 1f),
-        Template(GestureType.PINKY_UP, 0f, 0f, 0f, 1f, null),
-        Template(GestureType.ROCK, 1f, 0f, 0f, 1f, null),
         // Poing et pouce levé ne diffèrent que par le pouce : c'est donc lui qui doit trancher,
         // et le modèle l'exige explicitement dans les deux cas.
         Template(GestureType.FIST, 0f, 0f, 0f, 0f, 0f),

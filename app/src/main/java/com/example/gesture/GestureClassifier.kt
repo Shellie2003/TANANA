@@ -5,9 +5,29 @@ import kotlin.math.abs
 /**
  * Vocabulaire gestuel.
  *
- * Les poses ont été choisies pour être **mutuellement discriminables** par le seul décompte des
- * doigts tendus : c'est le signal le plus robuste que fournisse un suivi de main monoculaire.
- * Deux poses qui ne diffèrent que par un angle subtil seraient confondues dès que la main pivote.
+ * ## Pourquoi cinq poses, et celles-ci
+ *
+ * Le vocabulaire en a compté huit, et il était instable à l'usage. La cause n'était pas le
+ * classifieur mais le choix des poses, et deux constats la cernent.
+ *
+ * Le premier vient du suivi lui-même : le mode d'échec dominant de MediaPipe est l'occlusion des
+ * doigts par la paume vue de la caméra. Or c'est exactement ce que produit un décompte de doigts —
+ * les doigts repliés disparaissent derrière la paume, et ce sont eux qui portent l'information.
+ * Plus une pose replie de doigts, moins elle est fiable, ce qui condamne l'idée même de compter.
+ *
+ * Le second est anatomique : l'annulaire ne se replie pas indépendamment du majeur et de
+ * l'auriculaire, leurs tendons fléchisseurs étant couplés. La pose « trois doigts » demandait donc
+ * un mouvement que la plupart des mains ne peuvent pas produire proprement, et l'auriculaire seul
+ * comme le signe « cornes » exigeaient un contrôle isolé du plus petit et du plus mal suivi des
+ * doigts.
+ *
+ * Les cinq poses retenues sont exactement celles du jeu canonique de MediaPipe — poing, main
+ * ouverte, index pointé, pouce levé, « V » — c'est-à-dire celles sur lesquelles le modèle a été
+ * entraîné et mesuré. Écarter les trois autres a fait passer la marge minimale du vocabulaire de
+ * 0,130 à 0,200, et celle de la main ouverte de 0,250 à 0,500.
+ *
+ * Le vocabulaire n'a pas rétréci pour autant : les commandes libérées passent aux balayages, qui
+ * ne dépendent d'aucun doigt replié, et au contact du pouce, qui est un signal orthogonal.
  */
 enum class GestureType {
     /** Aucune main exploitable. */
@@ -16,11 +36,8 @@ enum class GestureType {
     /** Index seul tendu. Pilote le curseur. */
     POINT,
 
-    /** Index et majeur tendus. Pilote le défilement vertical. */
+    /** Index et majeur tendus — le « V ». Pose de navigation : c'est de là que partent les balayages. */
     TWO_FINGER,
-
-    /** Index, majeur et annulaire tendus. Commutation entre applications. */
-    THREE_FINGER,
 
     /** Main grande ouverte. Lecture / pause du média en cours. */
     OPEN_PALM,
@@ -30,18 +47,6 @@ enum class GestureType {
 
     /** Pouce seul tendu. Accueil. */
     THUMB_UP,
-
-    /**
-     * Auriculaire seul tendu. Se distingue de toutes les autres poses par un doigt entier, ce qui
-     * en fait un signe franc malgré son apparente discrétion.
-     */
-    PINKY_UP,
-
-    /**
-     * Index et auriculaire tendus, majeur et annulaire repliés — le signe « cornes ». Deux doigts
-     * non adjacents : aucune pose du vocabulaire ne s'en approche.
-     */
-    ROCK,
 
     /** Balayages, émis comme évènements ponctuels sur les quatre directions. */
     SWIPE_LEFT,
@@ -163,9 +168,10 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
         val poseChanged = candidateFrames >= config.framesToLatch && latchedPose != candidatePose
         if (poseChanged) latchedPose = candidatePose
 
-        // Balayage : seulement en pose à trois doigts, dédiée à la navigation entre applications.
+        // Les balayages partent de la pose en « V », qui leur est dédiée : aucune action ponctuelle
+        // ne lui est associée, si bien qu'entrer dans la pose pour balayer ne déclenche rien.
         pushHistory(timestampMs, metrics.pointerX, metrics.pointerY)
-        val swipe = detectSwipe(timestampMs, allowed = latchedPose == GestureType.THREE_FINGER)
+        val swipe = detectSwipe(timestampMs, allowed = latchedPose == GestureType.TWO_FINGER)
 
         // La confiance chute pendant une transition de pose : une action déclenchée à cet instant
         // serait probablement une pose intermédiaire mal interprétée.

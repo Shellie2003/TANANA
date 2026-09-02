@@ -184,9 +184,13 @@ class GesturePolicyTest {
 
     // --- Défilement ---------------------------------------------------------------------------
 
+    /** Le défilement continu reste assignable, même s'il n'est plus câblé par défaut. */
+    private fun scrollPolicy() =
+        policy(GestureBindings().with(GestureType.TWO_FINGER, BindableAction.SCROLL))
+
     @Test
     fun `le sens du defilement suit la main`() {
-        val p = policy()
+        val p = scrollPolicy()
         p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.6f, isNewPose = true, timestampMs = 0)
         val up = p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.4f, isNewPose = false, timestampMs = 33)
             .filterIsInstance<SystemAction.Scroll>().single()
@@ -195,7 +199,7 @@ class GesturePolicyTest {
 
     @Test
     fun `le tremblement ne fait pas defiler`() {
-        val p = policy()
+        val p = scrollPolicy()
         p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.5f, isNewPose = true, timestampMs = 0)
         val actions = p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.503f, isNewPose = false, timestampMs = 33)
         assertTrue(actions.none { it is SystemAction.Scroll })
@@ -203,7 +207,7 @@ class GesturePolicyTest {
 
     @Test
     fun `changer de pose reamorce la reference de defilement`() {
-        val p = policy()
+        val p = scrollPolicy()
         p.onGesture(GestureType.POINT, 0.5f, 0.1f, isNewPose = true, timestampMs = 0)
         p.onGesture(GestureType.POINT, 0.5f, 0.9f, isNewPose = false, timestampMs = 33)
         val first = p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.9f, isNewPose = true, timestampMs = 66)
@@ -313,7 +317,7 @@ class GesturePolicyTest {
      */
     @Test
     fun `un balayage ne reamorce pas le geste continu sous-jacent`() {
-        val p = policy()
+        val p = scrollPolicy()
         p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.50f, isNewPose = true, timestampMs = 0)
         p.onGesture(GestureType.TWO_FINGER, 0.5f, 0.45f, isNewPose = false, timestampMs = 33)
         p.onGesture(GestureType.SWIPE_RIGHT, 0.5f, 0.45f, isNewPose = true, timestampMs = 66)
@@ -324,25 +328,24 @@ class GesturePolicyTest {
 
     // --- Poses ajoutées -----------------------------------------------------------------------
 
+    /**
+     * Le « V » est la pose des balayages : lui associer une action ponctuelle la déclencherait à
+     * chaque fois qu'on entre dans la pose pour balayer.
+     */
     @Test
-    fun `l auriculaire ouvre le clavier gestuel`() {
-        assertTrue(
-            hold(policy(), GestureType.PINKY_UP, frames = 10).contains(SystemAction.ToggleKeyboard)
-        )
-    }
-
-    /** Les données mobiles se basculent depuis les réglages rapides : ce geste y donne accès. */
-    @Test
-    fun `le signe cornes ouvre les reglages rapides`() {
-        assertTrue(hold(policy(), GestureType.ROCK, frames = 10).contains(SystemAction.QuickSettings))
+    fun `la pose de navigation ne declenche rien par elle-meme`() {
+        assertEquals(BindableAction.NONE, GestureBindings()[GestureType.TWO_FINGER])
+        assertTrue(hold(policy(), GestureType.TWO_FINGER, frames = 30).isEmpty())
     }
 
     @Test
-    fun `chaque geste configurable a une action par defaut definie`() {
+    fun `chaque pose tenue autre que la navigation a une action par defaut`() {
         val bindings = GestureBindings()
-        GestureBindings.CONFIGURABLE_POSES.forEach { pose ->
-            assertNotEquals("$pose n'a pas d'action par défaut", BindableAction.NONE, bindings[pose])
-        }
+        GestureBindings.CONFIGURABLE_POSES
+            .filterNot { GestureBindings.isSwipe(it) || it == GestureType.TWO_FINGER }
+            .forEach { pose ->
+                assertNotEquals("$pose n'a pas d'action par défaut", BindableAction.NONE, bindings[pose])
+            }
     }
 
     @Test

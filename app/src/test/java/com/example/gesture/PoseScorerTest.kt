@@ -22,7 +22,6 @@ class PoseScorerTest {
     fun `chaque pose franche est reconnue`() {
         assertEquals(GestureType.POINT, scorer.classify(metrics(1f, 0f, 0f, 0f)))
         assertEquals(GestureType.TWO_FINGER, scorer.classify(metrics(1f, 1f, 0f, 0f)))
-        assertEquals(GestureType.THREE_FINGER, scorer.classify(metrics(1f, 1f, 1f, 0f)))
         assertEquals(GestureType.OPEN_PALM, scorer.classify(metrics(1f, 1f, 1f, 1f)))
     }
 
@@ -38,14 +37,36 @@ class PoseScorerTest {
     }
 
     /**
-     * Le cœur du problème des conflits : un annulaire à mi-course rend « deux doigts » et
-     * « trois doigts » également plausibles. L'ancienne cascade de seuils tranchait
-     * arbitrairement et déclenchait une action non voulue ; le score doit refuser de décider.
+     * Le cœur du problème des conflits : un annulaire à mi-course rend « deux doigts » et « main
+     * ouverte » également plausibles. Une cascade de seuils trancherait arbitrairement et
+     * déclencherait une action non voulue ; le score doit refuser de décider.
      */
     @Test
     fun `une pose ambigue est rejetee plutot que devinee`() {
-        val ambiguous = metrics(1f, 1f, 0.5f, 0f)
+        val ambiguous = metrics(1f, 1f, 0.4f, 0.4f)
         assertNull("une pose a été devinée sur une main ambiguë", scorer.classify(ambiguous))
+    }
+
+    /**
+     * Garde-fou chiffré du vocabulaire. La marge minimale mesurée est ce qui sépare une pose
+     * reconnue d'une pose devinée : elle était tombée à 0,130 avec huit poses, sur une main
+     * pourtant parfaite, ce qui rendait la paire poing / pouce levé instable sur une main réelle.
+     * Toute pose réintroduite qui la ferait redescendre doit faire échouer ce test.
+     */
+    @Test
+    fun `la marge minimale du vocabulaire reste confortable`() {
+        val cases = listOf(
+            SyntheticHand.pointing(),
+            SyntheticHand.twoFingers(),
+            SyntheticHand.openPalm(),
+            SyntheticHand.fist(),
+            SyntheticHand.thumbUp()
+        )
+        val worst = cases.minOf { hand ->
+            val scores = scorer.scoreAll(SyntheticHand.metrics(hand))
+            scores[0].score - scores[1].score
+        }
+        assertTrue("marge minimale tombée à $worst", worst >= 0.19f)
     }
 
     @Test
@@ -63,12 +84,6 @@ class PoseScorerTest {
         assertNull(scorer.classify(metrics(0.4f, 0.4f, 0.4f, 0.4f)))
     }
 
-    @Test
-    fun `les deux poses ajoutees sont reconnues`() {
-        assertEquals(GestureType.PINKY_UP, scorer.classify(SyntheticHand.metrics(SyntheticHand.pinkyUp())))
-        assertEquals(GestureType.ROCK, scorer.classify(SyntheticHand.metrics(SyntheticHand.rock())))
-    }
-
     /**
      * Test de non-régression du vocabulaire : chaque pose du catalogue doit se reconnaître
      * elle-même, avec une marge supérieure au seuil de rejet.
@@ -83,10 +98,7 @@ class PoseScorerTest {
         val cases = mapOf(
             GestureType.POINT to SyntheticHand.pointing(),
             GestureType.TWO_FINGER to SyntheticHand.twoFingers(),
-            GestureType.THREE_FINGER to SyntheticHand.threeFingers(),
             GestureType.OPEN_PALM to SyntheticHand.openPalm(),
-            GestureType.PINKY_UP to SyntheticHand.pinkyUp(),
-            GestureType.ROCK to SyntheticHand.rock(),
             GestureType.FIST to SyntheticHand.fist(),
             GestureType.THUMB_UP to SyntheticHand.thumbUp()
         )
@@ -124,7 +136,7 @@ class PoseScorerTest {
     fun `une marge plus exigeante rejette davantage`() {
         val lenient = PoseScorer(PoseScorer.Config(minMargin = 0.02f, minScore = 0.5f))
         val strict = PoseScorer(PoseScorer.Config(minMargin = 0.45f, minScore = 0.5f))
-        // Annulaire légèrement fléchi : marge mesurée à 0.108, entre les deux réglages.
+        // Annulaire légèrement fléchi : marge intermédiaire, entre les deux réglages.
         val borderline = metrics(1f, 1f, 0.2f, 0f)
 
         assertNotNull(lenient.classify(borderline))

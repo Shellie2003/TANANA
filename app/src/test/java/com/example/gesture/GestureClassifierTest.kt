@@ -41,12 +41,6 @@ class GestureClassifierTest {
     }
 
     @Test
-    fun `trois doigts reconnus`() {
-        val (result, _) = feed(GestureClassifier(), SyntheticHand.threeFingers(), frames = 8)
-        assertEquals(GestureType.THREE_FINGER, result.gesture)
-    }
-
-    @Test
     fun `main ouverte reconnue`() {
         val (result, _) = feed(GestureClassifier(), SyntheticHand.openPalm(), frames = 8)
         assertEquals(GestureType.OPEN_PALM, result.gesture)
@@ -100,12 +94,9 @@ class GestureClassifierTest {
         val poses = mapOf(
             GestureType.POINT to SyntheticHand.pointing(),
             GestureType.TWO_FINGER to SyntheticHand.twoFingers(),
-            GestureType.THREE_FINGER to SyntheticHand.threeFingers(),
             GestureType.OPEN_PALM to SyntheticHand.openPalm(),
             GestureType.FIST to SyntheticHand.fist(),
-            GestureType.THUMB_UP to SyntheticHand.thumbUp(),
-            GestureType.PINKY_UP to SyntheticHand.pinkyUp(),
-            GestureType.ROCK to SyntheticHand.rock()
+            GestureType.THUMB_UP to SyntheticHand.thumbUp()
         )
 
         val observed = poses.mapValues { (_, hand) ->
@@ -136,9 +127,9 @@ class GestureClassifierTest {
     }
 
     /**
-     * Passer de l'index seul à la main ouverte traverse mécaniquement des poses à deux et trois
-     * doigts. Aucune de ces poses intermédiaires ne doit être verrouillée, sans quoi le simple
-     * fait d'ouvrir la main déclencherait la commutation d'applications.
+     * Passer de l'index seul à la main ouverte traverse mécaniquement la pose en « V ». Elle ne
+     * doit pas être verrouillée au passage, sans quoi ouvrir la main armerait la détection de
+     * balayage et le mouvement d'ouverture lui-même pourrait être lu comme un balayage.
      */
     @Test
     fun `l ouverture progressive de la main ne verrouille pas les poses traversees`() {
@@ -159,8 +150,8 @@ class GestureClassifierTest {
         }
 
         assertTrue(
-            "poses intermédiaires verrouillées: $seen",
-            GestureType.THREE_FINGER !in seen
+            "pose intermédiaire verrouillée: $seen",
+            GestureType.TWO_FINGER !in seen
         )
     }
 
@@ -179,17 +170,17 @@ class GestureClassifierTest {
     // --- Balayage ----------------------------------------------------------------------------
 
     @Test
-    fun `balayage reconnu en pose a trois doigts`() {
+    fun `balayage reconnu en pose V`() {
         val classifier = GestureClassifier()
         var t = 0L
         var events = 0
         var direction: GestureType? = null
 
         // Verrouiller la pose avant de balayer.
-        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.threeFingers(0.32f)), t); t += FRAME_MS }
+        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.twoFingers(0.32f)), t); t += FRAME_MS }
         for (i in 0..6) {
             val r = classifier.update(
-                SyntheticHand.metrics(SyntheticHand.threeFingers(0.32f + i * 0.06f)), t
+                SyntheticHand.metrics(SyntheticHand.twoFingers(0.32f + i * 0.06f)), t
             )
             if (r.isSwipeEvent) { events++; direction = r.gesture }
             t += FRAME_MS
@@ -201,7 +192,7 @@ class GestureClassifierTest {
 
     /** Un balayage en pointage déplacerait le curseur : il ne doit surtout pas changer d'application. */
     @Test
-    fun `balayage ignore hors de la pose a trois doigts`() {
+    fun `balayage ignore hors de la pose V`() {
         val classifier = GestureClassifier()
         var t = 0L
         var events = 0
@@ -225,7 +216,7 @@ class GestureClassifierTest {
         var events = 0
         for (i in 0..30) {
             if (classifier.update(
-                    SyntheticHand.metrics(SyntheticHand.threeFingers(0.30f + i * 0.012f)), t
+                    SyntheticHand.metrics(SyntheticHand.twoFingers(0.30f + i * 0.012f)), t
                 ).isSwipeEvent
             ) events++
             t += 60
@@ -238,26 +229,26 @@ class GestureClassifierTest {
         val classifier = GestureClassifier()
         var t = 0L
         var events = 0
-        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.threeFingers(0.45f)), t); t += FRAME_MS }
+        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.twoFingers(0.45f)), t); t += FRAME_MS }
         for (x in floatArrayOf(0.35f, 0.55f, 0.35f, 0.58f, 0.34f, 0.60f)) {
-            if (classifier.update(SyntheticHand.metrics(SyntheticHand.threeFingers(x)), t).isSwipeEvent) events++
+            if (classifier.update(SyntheticHand.metrics(SyntheticHand.twoFingers(x)), t).isSwipeEvent) events++
             t += FRAME_MS
         }
         assertEquals(0, events)
     }
 
-    /** Main à trois doigts placée librement dans l'image, pour éprouver les deux axes. */
-    private fun threeFingersAt(cx: Float, cy: Float) = SyntheticHand.metrics(
-        SyntheticHand.build(cx = cx, cy = cy, extension = floatArrayOf(1f, 1f, 1f, 0f))
+    /** Main en « V » placée librement dans l'image, pour éprouver les deux axes. */
+    private fun twoFingersAt(cx: Float, cy: Float) = SyntheticHand.metrics(
+        SyntheticHand.build(cx = cx, cy = cy, extension = floatArrayOf(1f, 1f, 0f, 0f))
     )
 
     private fun swipeDirection(steps: List<Pair<Float, Float>>): GestureType? {
         val classifier = GestureClassifier()
         var t = 0L
         var direction: GestureType? = null
-        repeat(5) { classifier.update(threeFingersAt(steps.first().first, steps.first().second), t); t += FRAME_MS }
+        repeat(5) { classifier.update(twoFingersAt(steps.first().first, steps.first().second), t); t += FRAME_MS }
         steps.forEach { (x, y) ->
-            val r = classifier.update(threeFingersAt(x, y), t)
+            val r = classifier.update(twoFingersAt(x, y), t)
             if (r.isSwipeEvent) direction = r.gesture
             t += FRAME_MS
         }

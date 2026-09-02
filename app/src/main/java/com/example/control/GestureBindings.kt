@@ -117,12 +117,9 @@ data class GestureBindings(
         val CONFIGURABLE_POSES = listOf(
             GestureType.POINT,
             GestureType.TWO_FINGER,
-            GestureType.THREE_FINGER,
             GestureType.OPEN_PALM,
             GestureType.FIST,
             GestureType.THUMB_UP,
-            GestureType.PINKY_UP,
-            GestureType.ROCK,
             GestureType.SWIPE_LEFT,
             GestureType.SWIPE_RIGHT,
             GestureType.SWIPE_UP,
@@ -142,27 +139,27 @@ data class GestureBindings(
          * ponctuelles, dont un déclenchement accidentel coûte le plus cher, aux poses les plus
          * franches.
          *
-         * Aucune pose ne porte le glisser, et c'est délibéré : le glisser est le clic maintenu.
-         * Le contact pouce-index prolongé saisit l'élément visé et le suit ; il n'y a donc rien à
-         * apprendre de plus, et surtout aucune pose supplémentaire à distinguer. L'action
-         * « Glisser » reste assignable pour qui préfère un geste dédié.
+         * Aucune pose ne porte le glisser ni le défilement, et c'est délibéré : le contact
+         * pouce-index maintenu pose le doigt, qui suit la main. Défiler, glisser et balayer en
+         * découlent, interprétés par le système. Il n'y a donc rien à apprendre de plus, et
+         * surtout aucune pose supplémentaire à distinguer.
          *
-         * Les deux poses ajoutées comblent les manques signalés à l'usage : le volet des réglages
-         * rapides — d'où se basculent données mobiles et Wi-Fi — et le clavier gestuel, qui
-         * n'avait jusqu'ici aucun geste pour l'ouvrir.
+         * Cinq poses ne suffisent pas à porter toutes les actions par défaut : le clavier gestuel
+         * et les réglages rapides restent assignables mais ne sont plus câblés. C'est le prix
+         * assumé de la fiabilité — trois poses de plus ne servaient à rien si aucune des huit
+         * n'était sûre.
          */
         val DEFAULTS: Map<GestureType, BindableAction> = mapOf(
             GestureType.POINT to BindableAction.CURSOR,
-            GestureType.TWO_FINGER to BindableAction.SCROLL,
-            GestureType.THREE_FINGER to BindableAction.RECENTS,
+            // Le « V » ne porte volontairement aucune action : c'est la pose des balayages, et une
+            // action ponctuelle partirait à chaque fois qu'on y entre pour balayer.
+            GestureType.TWO_FINGER to BindableAction.NONE,
             GestureType.OPEN_PALM to BindableAction.PLAY_PAUSE,
             GestureType.FIST to BindableAction.BACK,
             GestureType.THUMB_UP to BindableAction.HOME,
-            GestureType.PINKY_UP to BindableAction.KEYBOARD,
-            GestureType.ROCK to BindableAction.QUICK_SETTINGS,
             GestureType.SWIPE_LEFT to BindableAction.SWITCH_PREVIOUS,
             GestureType.SWIPE_RIGHT to BindableAction.SWITCH_NEXT,
-            GestureType.SWIPE_UP to BindableAction.HOME,
+            GestureType.SWIPE_UP to BindableAction.RECENTS,
             GestureType.SWIPE_DOWN to BindableAction.NOTIFICATIONS
         )
 

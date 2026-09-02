@@ -23,14 +23,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -162,7 +160,7 @@ fun StarkControlCenter(
             )
         }
 
-        item { SectionTitle("Balayages", "En pose à trois doigts, d'un mouvement franc") }
+        item { SectionTitle("Balayages", "En pose « V », d'un mouvement franc") }
         item {
             GestureLegend(
                 docs = SWIPE_DOCS,
@@ -560,12 +558,8 @@ private val POSE_DOCS = listOf(
             "et suit la main — c'est ce qui fait défiler, glisser et balayer.", StarkCyan
     ),
     GestureDoc(
-        GestureType.TWO_FINGER, Icons.Default.UnfoldMore, "Index + majeur",
-        "Défilement continu, pour parcourir lentement et précisément", StarkBlue
-    ),
-    GestureDoc(
-        GestureType.THREE_FINGER, Icons.Default.SwapHoriz, "Trois doigts",
-        "C'est aussi la pose des balayages", StarkBlue
+        GestureType.TWO_FINGER, Icons.Default.SwapHoriz, "Index + majeur (V)",
+        "Pose de navigation : c'est d'elle que partent les quatre balayages", StarkBlue
     ),
     GestureDoc(
         GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte",
@@ -578,33 +572,25 @@ private val POSE_DOCS = listOf(
     GestureDoc(
         GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé",
         "Poing fermé, pouce sorti", StarkRed
-    ),
-    GestureDoc(
-        GestureType.PINKY_UP, Icons.Default.Keyboard, "Auriculaire seul",
-        "Petit doigt tendu, les autres repliés", StarkGold
-    ),
-    GestureDoc(
-        GestureType.ROCK, Icons.Default.Wifi, "Cornes",
-        "Index et auriculaire tendus, majeur et annulaire repliés", StarkGold
     )
 )
 
 private val SWIPE_DOCS = listOf(
     GestureDoc(
         GestureType.SWIPE_LEFT, Icons.Default.ArrowBack, "Balayage à gauche",
-        "En pose à trois doigts, d'un geste franc", StarkBlue
+        "En pose « V », d'un geste franc", StarkBlue
     ),
     GestureDoc(
         GestureType.SWIPE_RIGHT, Icons.Default.SwapHoriz, "Balayage à droite",
-        "En pose à trois doigts, d'un geste franc", StarkBlue
+        "En pose « V », d'un geste franc", StarkBlue
     ),
     GestureDoc(
         GestureType.SWIPE_UP, Icons.Default.UnfoldMore, "Balayage vers le haut",
-        "En pose à trois doigts, main qui remonte", StarkBlue
+        "En pose « V », main qui remonte", StarkBlue
     ),
     GestureDoc(
         GestureType.SWIPE_DOWN, Icons.Default.Notifications, "Balayage vers le bas",
-        "En pose à trois doigts, main qui descend", StarkBlue
+        "En pose « V », main qui descend", StarkBlue
     )
 )
 

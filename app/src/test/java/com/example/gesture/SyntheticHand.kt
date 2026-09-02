@@ -81,17 +81,6 @@ object SyntheticHand {
     fun twoFingers(cx: Float = 0.5f) =
         build(cx = cx, extension = floatArrayOf(1f, 1f, 0f, 0f))
 
-    fun threeFingers(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(1f, 1f, 1f, 0f))
-
-    /** Auriculaire seul tendu. */
-    fun pinkyUp(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(0f, 0f, 0f, 1f))
-
-    /** Index et auriculaire tendus, majeur et annulaire repliés. */
-    fun rock(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(1f, 0f, 0f, 1f))
-
     /** Poing dont seul le pouce ressort. */
     fun thumbUp(cx: Float = 0.5f) =
         build(cx = cx, extension = floatArrayOf(0f, 0f, 0f, 0f), thumbCurled = false, pinchDistance = 1.6f)
