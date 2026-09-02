@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -571,7 +572,11 @@ private val POSE_DOCS = listOf(
     ),
     GestureDoc(
         GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé",
-        "Poing fermé, pouce sorti", StarkRed
+        "Poing fermé, pouce sorti vers le haut", StarkRed
+    ),
+    GestureDoc(
+        GestureType.THUMB_DOWN, Icons.Default.Wifi, "Pouce baissé",
+        "Poing fermé, pouce sorti vers le bas", StarkGold
     )
 )
 

@@ -120,6 +120,7 @@ data class GestureBindings(
             GestureType.OPEN_PALM,
             GestureType.FIST,
             GestureType.THUMB_UP,
+            GestureType.THUMB_DOWN,
             GestureType.SWIPE_LEFT,
             GestureType.SWIPE_RIGHT,
             GestureType.SWIPE_UP,
@@ -144,10 +145,10 @@ data class GestureBindings(
          * découlent, interprétés par le système. Il n'y a donc rien à apprendre de plus, et
          * surtout aucune pose supplémentaire à distinguer.
          *
-         * Cinq poses ne suffisent pas à porter toutes les actions par défaut : le clavier gestuel
-         * et les réglages rapides restent assignables mais ne sont plus câblés. C'est le prix
-         * assumé de la fiabilité — trois poses de plus ne servaient à rien si aucune des huit
-         * n'était sûre.
+         * Le pouce baissé est venu du classifieur entraîné, qui sait l'orienter là où notre score
+         * géométrique, ne mesurant que l'extension des doigts, en était incapable. Il reprend les
+         * réglages rapides — données mobiles, Wi-Fi, lampe. Le clavier gestuel reste assignable
+         * sans être câblé : six poses fiables valent mieux que huit dont aucune ne l'était.
          */
         val DEFAULTS: Map<GestureType, BindableAction> = mapOf(
             GestureType.POINT to BindableAction.CURSOR,
@@ -157,6 +158,7 @@ data class GestureBindings(
             GestureType.OPEN_PALM to BindableAction.PLAY_PAUSE,
             GestureType.FIST to BindableAction.BACK,
             GestureType.THUMB_UP to BindableAction.HOME,
+            GestureType.THUMB_DOWN to BindableAction.QUICK_SETTINGS,
             GestureType.SWIPE_LEFT to BindableAction.SWITCH_PREVIOUS,
             GestureType.SWIPE_RIGHT to BindableAction.SWITCH_NEXT,
             GestureType.SWIPE_UP to BindableAction.RECENTS,

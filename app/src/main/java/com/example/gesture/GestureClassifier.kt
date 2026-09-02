@@ -48,6 +48,15 @@ enum class GestureType {
     /** Pouce seul tendu. Accueil. */
     THUMB_UP,
 
+    /**
+     * Pouce seul tendu vers le bas.
+     *
+     * Cette pose n'est atteignable que par le classifieur entraîné : notre score géométrique ne
+     * mesure que l'extension des doigts, pas leur orientation, et ne saurait donc pas la
+     * distinguer du pouce levé.
+     */
+    THUMB_DOWN,
+
     /** Balayages, émis comme évènements ponctuels sur les quatre directions. */
     SWIPE_LEFT,
     SWIPE_RIGHT,
@@ -102,6 +111,11 @@ data class GestureConfig(
  *     geste déclencheraient des actions parasites.
  *  3. **Filtrage par qualité** — les poses géométriquement invraisemblables sont ignorées.
  *
+ * La pose elle-même vient du classifieur entraîné de MediaPipe quand il se prononce, et du score
+ * géométrique sinon. Ces mécanismes s'appliquent à la sortie de l'un comme de l'autre : le
+ * classifieur donne un avis par image, pas une décision stable, et c'est bien le verrou temporel
+ * qui rend l'ensemble utilisable.
+ *
  * Kotlin pur, sans dépendance Android : entièrement testable en JVM.
  */
 class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
@@ -134,8 +148,16 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
     /**
      * Classe une frame. [metrics] à null signifie « aucune main détectée ».
      * [timestampMs] doit être monotone croissant.
+     *
+     * @param recognized pose donnée par le classifieur entraîné, ou null s'il s'est abstenu. Quand
+     *   elle est fournie, elle l'emporte sur le score géométrique — mais passe par le même verrou
+     *   temporel, qui reste ce qui empêche une pose traversée d'être verrouillée.
      */
-    fun update(metrics: HandMetrics?, timestampMs: Long): GestureResult {
+    fun update(
+        metrics: HandMetrics?,
+        timestampMs: Long,
+        recognized: GestureType? = null
+    ): GestureResult {
         val previous = latchedPose
 
         if (metrics == null || metrics.quality < config.minQuality) {
@@ -156,7 +178,8 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
 
         lastSeenTime = timestampMs
 
-        val rawPose = classifyPose(metrics)
+        val rawPose = recognized ?: classifyPose(metrics)
+        if (recognized != null) poseMargin = scorer.margin(metrics)
 
         // Verrou temporel : la pose ne change qu'après N frames cohérentes.
         if (rawPose == candidatePose) {

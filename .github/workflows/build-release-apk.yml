@@ -120,7 +120,7 @@ jobs:
           set -euo pipefail
 
           python3 - "$RELEASE_APK" <<'PY'
-          import sys, zipfile
+          import io, sys, zipfile
           apk = zipfile.ZipFile(sys.argv[1])
           names = apk.namelist()
 
@@ -134,9 +134,24 @@ jobs:
                   method = "STORED" if info.compress_type == zipfile.ZIP_STORED else "DEFLATED"
                   print(f"  {info.filename}  {info.file_size} octets  {method}")
 
-          if not any("hand_landmarker.task" in n for n in names):
-              print("::error::assets/hand_landmarker.task absent de l'APK.")
+          # Le paquet du reconnaisseur contient le modèle de points de repère *et* le classifieur
+          # de poses. Vérifier qu'il est là et qu'il porte bien les deux : un paquet tronqué se
+          # chargerait sans erreur, et le classifieur s'abstiendrait silencieusement — la pose
+          # serait alors toujours décidée par le repli géométrique, sans que rien ne le signale.
+          if not any("gesture_recognizer.task" in n for n in names):
+              print("::error::assets/gesture_recognizer.task absent de l'APK.")
               sys.exit(1)
+
+          bundle = io.BytesIO(apk.read(
+              next(n for n in names if n.endswith("gesture_recognizer.task"))))
+          inner = zipfile.ZipFile(bundle).namelist()
+          print("## Contenu du paquet de vision")
+          for name in inner:
+              print(f"  {name}")
+          for required in ("hand_landmarker.task", "hand_gesture_recognizer.task"):
+              if required not in inner:
+                  print(f"::error::{required} absent du paquet gesture_recognizer.task.")
+                  sys.exit(1)
 
           print("## Bibliothèques natives")
           libs = [n for n in names if n.endswith(".so")]

@@ -10,14 +10,14 @@ import android.system.OsConstants
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import com.example.power.FrameGate
+import com.example.power.PowerMode
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
-import com.example.power.FrameGate
-import com.example.power.PowerMode
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer
+import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizerResult
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -82,7 +82,7 @@ class HandGestureAnalyzer(
 
     private companion object {
         const val TAG = "HandGestureAnalyzer"
-        const val MODEL_ASSET = "hand_landmarker.task"
+        const val MODEL_ASSET = "gesture_recognizer.task"
 
         /**
          * Prédiction de latence appliquée au curseur. Correspond à la latence typique de la
@@ -94,7 +94,7 @@ class HandGestureAnalyzer(
         const val GPU_FAILURE_THRESHOLD = 5
     }
 
-    private var handLandmarker: HandLandmarker? = null
+    private var recognizer: GestureRecognizer? = null
     private var visionUnavailable = false
     private var visionError: String? = null
     private var activeDelegate: Delegate? = null
@@ -177,11 +177,11 @@ class HandGestureAnalyzer(
 
         val failures = mutableListOf<String>()
         for ((delegate, useBuffer, label) in attempts) {
-            val result = createLandmarker(delegate, useBuffer)
-            result.onSuccess { landmarker ->
-                handLandmarker = landmarker
+            val result = createRecognizer(delegate, useBuffer)
+            result.onSuccess { built ->
+                recognizer = built
                 activeDelegate = delegate
-                Log.i(TAG, "HandLandmarker initialisé ($label)")
+                Log.i(TAG, "GestureRecognizer initialisé ($label)")
                 return
             }
             result.onFailure { error ->
@@ -226,7 +226,15 @@ class HandGestureAnalyzer(
         }
     }
 
-    private fun createLandmarker(delegate: Delegate, useBuffer: Boolean): Result<HandLandmarker> =
+    /**
+     * Construit le reconnaisseur de gestes.
+     *
+     * Le paquet `gesture_recognizer.task` contient le modèle de points de repère **et** le
+     * classifieur de poses : il remplace `hand_landmarker.task` au lieu de s'y ajouter, pour
+     * 554 Ko de plus. Les points de repère restent donc disponibles, et c'est essentiel — le
+     * curseur et le clic en dépendent, le classifieur ne fournissant qu'une étiquette.
+     */
+    private fun createRecognizer(delegate: Delegate, useBuffer: Boolean): Result<GestureRecognizer> =
         runCatching {
             val baseOptionsBuilder = BaseOptions.builder().setDelegate(delegate)
             if (useBuffer) {
@@ -235,7 +243,7 @@ class HandGestureAnalyzer(
                 baseOptionsBuilder.setModelAssetPath(MODEL_ASSET)
             }
 
-            val options = HandLandmarker.HandLandmarkerOptions.builder()
+            val options = GestureRecognizer.GestureRecognizerOptions.builder()
                 .setBaseOptions(baseOptionsBuilder.build())
                 // Seuils relevés par rapport aux valeurs par défaut : on préfère perdre une frame
                 // douteuse plutôt que piloter le curseur avec une détection incertaine.
@@ -251,7 +259,7 @@ class HandGestureAnalyzer(
                 }
                 .build()
 
-            HandLandmarker.createFromOptions(context, options)
+            GestureRecognizer.createFromOptions(context, options)
         }
 
     fun setSimulationMode(enabled: Boolean) {
@@ -314,11 +322,11 @@ class HandGestureAnalyzer(
 
             demoteToCpuIfGpuFailing()
 
-            val landmarker = handLandmarker ?: return
+            val engine = recognizer ?: return
             val bitmap = buildUprightBitmap(imageProxy) ?: return
 
             inferenceStartedAt = SystemClock.uptimeMillis()
-            landmarker.detectAsync(BitmapImageBuilder(bitmap).build(), nextTimestamp())
+            engine.recognizeAsync(BitmapImageBuilder(bitmap).build(), nextTimestamp())
         } catch (e: Throwable) {
             Log.w(TAG, "Frame ignorée: ${e.message}")
         } finally {
@@ -336,12 +344,12 @@ class HandGestureAnalyzer(
         if (consecutiveInferenceErrors < GPU_FAILURE_THRESHOLD) return
 
         Log.w(TAG, "Delegate GPU défaillant après $consecutiveInferenceErrors erreurs : repli sur CPU")
-        handLandmarker?.close()
+        recognizer?.close()
         activeDelegate = Delegate.CPU
         consecutiveInferenceErrors = 0
-        handLandmarker = createLandmarker(Delegate.CPU, useBuffer = false).getOrNull()
-            ?: createLandmarker(Delegate.CPU, useBuffer = true).getOrNull()
-        if (handLandmarker == null) {
+        recognizer = createRecognizer(Delegate.CPU, useBuffer = false).getOrNull()
+            ?: createRecognizer(Delegate.CPU, useBuffer = true).getOrNull()
+        if (recognizer == null) {
             visionUnavailable = true
             visionError = "repli CPU impossible après défaillance du GPU"
             activeDelegate = null
@@ -409,7 +417,7 @@ class HandGestureAnalyzer(
         return lastTimestamp
     }
 
-    private fun processHandResult(result: HandLandmarkerResult) {
+    private fun processHandResult(result: GestureRecognizerResult) {
         consecutiveInferenceErrors = 0
         val now = SystemClock.uptimeMillis()
         if (inferenceStartedAt > 0L) {
@@ -430,8 +438,14 @@ class HandGestureAnalyzer(
         val landmarks = ArrayList<Landmark>(raw.size)
         for (p in raw) landmarks.add(Landmark(p.x(), p.y(), p.z()))
 
+        // Étiquette du classifieur entraîné, quand il se prononce. Le score géométrique reste en
+        // second rideau : le classifieur répond « None » pour toute pose intermédiaire, et sans
+        // repli l'utilisateur n'aurait alors plus rien.
+        val top = result.gestures()?.firstOrNull()?.firstOrNull()
+        val recognized = CannedGesture.from(top?.categoryName(), top?.score() ?: 0f)
+
         val metrics = HandGeometry.analyze(landmarks)
-        val gestureResult = classifier.update(metrics, now)
+        val gestureResult = classifier.update(metrics, now, recognized)
 
         if (metrics == null) {
             emitNoHand(now)
@@ -509,8 +523,8 @@ class HandGestureAnalyzer(
 
     fun close() {
         frameGate.reset()
-        handLandmarker?.close()
-        handLandmarker = null
+        recognizer?.close()
+        recognizer = null
         activeDelegate = null
         reusableSource?.recycle()
         reusableSource = null

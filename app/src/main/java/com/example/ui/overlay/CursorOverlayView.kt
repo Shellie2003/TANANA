@@ -320,6 +320,7 @@ class CursorOverlayView(context: Context) : View(context) {
 
     private fun colorFor(gesture: GestureType): Int = when (gesture) {
         GestureType.FIST, GestureType.THUMB_UP -> COLOR_RED
+        GestureType.THUMB_DOWN -> COLOR_GOLD
         GestureType.TWO_FINGER -> COLOR_BLUE
         else -> COLOR_CYAN
     }
