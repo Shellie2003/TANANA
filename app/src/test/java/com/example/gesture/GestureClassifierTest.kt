@@ -2,7 +2,6 @@ package com.example.gesture
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -35,12 +34,6 @@ class GestureClassifierTest {
     }
 
     @Test
-    fun `index et majeur reconnus comme deux doigts`() {
-        val (result, _) = feed(GestureClassifier(), SyntheticHand.twoFingers(), frames = 8)
-        assertEquals(GestureType.TWO_FINGER, result.gesture)
-    }
-
-    @Test
     fun `main ouverte reconnue`() {
         val (result, _) = feed(GestureClassifier(), SyntheticHand.openPalm(), frames = 8)
         assertEquals(GestureType.OPEN_PALM, result.gesture)
@@ -52,10 +45,70 @@ class GestureClassifierTest {
         assertEquals(GestureType.FIST, result.gesture)
     }
 
+    /**
+     * Propriété centrale du vocabulaire : chaque pose doit produire une classification distincte.
+     * Deux poses confondues rendraient leurs deux actions inutilisables.
+     */
     @Test
-    fun `pouce leve reconnu et distingue du poing`() {
-        val (result, _) = feed(GestureClassifier(), SyntheticHand.thumbUp(), frames = 8)
-        assertEquals(GestureType.THUMB_UP, result.gesture)
+    fun `les poses du vocabulaire sont mutuellement discriminables`() {
+        val poses = mapOf(
+            GestureType.POINT to SyntheticHand.pointing(),
+            GestureType.OPEN_PALM to SyntheticHand.openPalm(),
+            GestureType.FIST to SyntheticHand.fist()
+        )
+
+        val observed = poses.mapValues { (_, hand) ->
+            feed(GestureClassifier(), hand, frames = 8).first.gesture
+        }
+
+        for ((expected, actual) in observed) {
+            assertEquals("pose $expected mal classée", expected, actual)
+        }
+        assertEquals(
+            "deux poses partagent la même classification",
+            poses.size,
+            observed.values.toSet().size
+        )
+    }
+
+    /**
+     * Le cœur de la refonte, exprimé comme une propriété vérifiable : **une forme de main qui n'est
+     * pas l'une des trois poses ne doit rien verrouiller.**
+     *
+     * Deux et trois doigts tendus étaient des poses, et c'est ce qui rendait le vocabulaire
+     * instable : chaque pose distinguée au nombre de doigts crée un piège, puisque changer de forme
+     * traverse mécaniquement tous les décomptes intermédiaires. Les voir rejetées — et non
+     * reclassées sur une pose voisine — est la garantie que le piège a disparu.
+     */
+    @Test
+    fun `les decomptes intermediaires ne verrouillent aucune pose`() {
+        // Deux et trois doigts longs. Quatre n'en est pas un : avec le pouce sorti, c'est la main
+        // ouverte elle-même.
+        for (fingers in 2..3) {
+            val extension = FloatArray(4) { if (it < fingers) 1f else 0f }
+            val hand = SyntheticHand.build(extension = extension)
+            val (result, _) = feed(GestureClassifier(), hand, frames = 10)
+            assertTrue(
+                "$fingers doigts tendus ont verrouillé ${result.gesture}",
+                result.gesture == GestureType.IDLE
+            )
+        }
+    }
+
+    /**
+     * Le pouce levé a été retiré du vocabulaire pour une raison mesurée : il ne diffère du poing
+     * que par le pouce, le plus mal suivi des cinq doigts, et il était la rivale la plus proche à
+     * la fois du poing et de l'index pointé. Il ne doit donc plus être reconnu comme une pose — ni,
+     * surtout, être pris pour un poing, ce qui déclencherait un retour en levant le pouce.
+     */
+    @Test
+    fun `le pouce leve n est plus une pose`() {
+        val (result, _) = feed(GestureClassifier(), SyntheticHand.thumbUp(), frames = 10)
+        assertNotEquals(
+            "le pouce levé déclencherait l'action du poing",
+            GestureType.FIST,
+            result.gesture
+        )
     }
 
     /**
@@ -85,34 +138,6 @@ class GestureClassifierTest {
         assertEquals(GestureType.POINT, dernier.gesture)
     }
 
-    /**
-     * Propriété centrale du vocabulaire : chaque pose doit produire une classification distincte.
-     * Deux poses confondues rendraient leurs deux actions inutilisables.
-     */
-    @Test
-    fun `les poses du vocabulaire sont mutuellement discriminables`() {
-        val poses = mapOf(
-            GestureType.POINT to SyntheticHand.pointing(),
-            GestureType.TWO_FINGER to SyntheticHand.twoFingers(),
-            GestureType.OPEN_PALM to SyntheticHand.openPalm(),
-            GestureType.FIST to SyntheticHand.fist(),
-            GestureType.THUMB_UP to SyntheticHand.thumbUp()
-        )
-
-        val observed = poses.mapValues { (_, hand) ->
-            feed(GestureClassifier(), hand, frames = 8).first.gesture
-        }
-
-        for ((expected, actual) in observed) {
-            assertEquals("pose $expected mal classée", expected, actual)
-        }
-        assertEquals(
-            "deux poses partagent la même classification",
-            poses.size,
-            observed.values.toSet().size
-        )
-    }
-
     // --- Stabilité ---------------------------------------------------------------------------
 
     @Test
@@ -127,31 +152,34 @@ class GestureClassifierTest {
     }
 
     /**
-     * Passer de l'index seul à la main ouverte traverse mécaniquement la pose en « V ». Elle ne
-     * doit pas être verrouillée au passage, sans quoi ouvrir la main armerait la détection de
-     * balayage et le mouvement d'ouverture lui-même pourrait être lu comme un balayage.
+     * Ouvrir la main depuis le pointage traverse tous les décomptes intermédiaires. Aucune pose
+     * autre que les deux extrémités du mouvement ne doit apparaître en route : c'est ce qui permet
+     * d'ouvrir la roue de commandes sans rien déclencher au passage.
      */
     @Test
-    fun `l ouverture progressive de la main ne verrouille pas les poses traversees`() {
+    fun `l ouverture progressive de la main ne verrouille aucune pose intermediaire`() {
         val classifier = GestureClassifier()
         var t = 0L
         val seen = mutableSetOf<GestureType>()
 
         repeat(6) { classifier.update(SyntheticHand.metrics(SyntheticHand.pointing()), t); t += FRAME_MS }
 
-        // Ouverture en 5 étapes, une seule frame chacune : trop rapide pour verrouiller.
-        for (step in 1..5) {
-            val opening = step / 5f
+        // Ouverture lente — dix étapes de trois images, assez pour que le verrou temporel puisse
+        // s'armer sur une pose intermédiaire si elle existait encore.
+        for (step in 1..10) {
+            val opening = step / 10f
             val hand = SyntheticHand.build(
                 extension = floatArrayOf(1f, opening, opening * 0.9f, opening * 0.8f)
             )
-            seen += classifier.update(HandGeometry.analyze(hand), t).gesture
-            t += FRAME_MS
+            repeat(3) {
+                seen += classifier.update(HandGeometry.analyze(hand), t).gesture
+                t += FRAME_MS
+            }
         }
 
         assertTrue(
             "pose intermédiaire verrouillée: $seen",
-            GestureType.TWO_FINGER !in seen
+            seen.all { it == GestureType.POINT || it == GestureType.OPEN_PALM }
         )
     }
 
@@ -164,124 +192,28 @@ class GestureClassifierTest {
             if (classifier.update(SyntheticHand.metrics(SyntheticHand.openPalm()), t).isNewPose) fronts++
             t += FRAME_MS
         }
-        assertEquals("la lecture/pause serait déclenchée en boucle", 1, fronts)
+        assertEquals("la roue serait réouverte en boucle", 1, fronts)
     }
 
-    // --- Balayage ----------------------------------------------------------------------------
-
-    @Test
-    fun `balayage reconnu en pose V`() {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var events = 0
-        var direction: GestureType? = null
-
-        // Verrouiller la pose avant de balayer.
-        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.twoFingers(0.32f)), t); t += FRAME_MS }
-        for (i in 0..6) {
-            val r = classifier.update(
-                SyntheticHand.metrics(SyntheticHand.twoFingers(0.32f + i * 0.06f)), t
-            )
-            if (r.isSwipeEvent) { events++; direction = r.gesture }
-            t += FRAME_MS
-        }
-
-        assertEquals(1, events)
-        assertEquals(GestureType.SWIPE_RIGHT, direction)
-    }
-
-    /** Un balayage en pointage déplacerait le curseur : il ne doit surtout pas changer d'application. */
-    @Test
-    fun `balayage ignore hors de la pose V`() {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var events = 0
-
-        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.pointing(0.32f)), t); t += FRAME_MS }
-        for (i in 0..6) {
-            if (classifier.update(
-                    SyntheticHand.metrics(SyntheticHand.pointing(0.32f + i * 0.06f)), t
-                ).isSwipeEvent
-            ) events++
-            t += FRAME_MS
-        }
-
-        assertEquals(0, events)
-    }
-
-    @Test
-    fun `mouvement lent n est pas un balayage`() {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var events = 0
-        for (i in 0..30) {
-            if (classifier.update(
-                    SyntheticHand.metrics(SyntheticHand.twoFingers(0.30f + i * 0.012f)), t
-                ).isSwipeEvent
-            ) events++
-            t += 60
-        }
-        assertEquals(0, events)
-    }
-
-    @Test
-    fun `aller-retour rapide n est pas un balayage`() {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var events = 0
-        repeat(5) { classifier.update(SyntheticHand.metrics(SyntheticHand.twoFingers(0.45f)), t); t += FRAME_MS }
-        for (x in floatArrayOf(0.35f, 0.55f, 0.35f, 0.58f, 0.34f, 0.60f)) {
-            if (classifier.update(SyntheticHand.metrics(SyntheticHand.twoFingers(x)), t).isSwipeEvent) events++
-            t += FRAME_MS
-        }
-        assertEquals(0, events)
-    }
-
-    /** Main en « V » placée librement dans l'image, pour éprouver les deux axes. */
-    private fun twoFingersAt(cx: Float, cy: Float) = SyntheticHand.metrics(
-        SyntheticHand.build(cx = cx, cy = cy, extension = floatArrayOf(1f, 1f, 0f, 0f))
-    )
-
-    private fun swipeDirection(steps: List<Pair<Float, Float>>): GestureType? {
-        val classifier = GestureClassifier()
-        var t = 0L
-        var direction: GestureType? = null
-        repeat(5) { classifier.update(twoFingersAt(steps.first().first, steps.first().second), t); t += FRAME_MS }
-        steps.forEach { (x, y) ->
-            val r = classifier.update(twoFingersAt(x, y), t)
-            if (r.isSwipeEvent) direction = r.gesture
-            t += FRAME_MS
-        }
-        return direction
-    }
+    // --- Classifieur entraîné ----------------------------------------------------------------
 
     /**
-     * Le volet des notifications — et donc les données mobiles — n'était atteignable par aucun
-     * geste tant que seuls les balayages horizontaux existaient.
+     * Une pose donnée par le classifieur entraîné passe par le même verrou temporel que le score
+     * géométrique. C'est indispensable : le classifieur donne un avis par image, pas une décision
+     * stable, et une seule image mal lue ne doit pas déclencher d'action.
      */
     @Test
-    fun `un balayage vers le bas est reconnu`() {
-        assertEquals(
-            GestureType.SWIPE_DOWN,
-            swipeDirection((0..6).map { 0.5f to 0.30f + it * 0.06f })
-        )
-    }
+    fun `une pose du classifieur entraine passe par le verrou temporel`() {
+        val classifier = GestureClassifier()
+        var t = 0L
+        val metrics = SyntheticHand.metrics(SyntheticHand.pointing())
 
-    @Test
-    fun `un balayage vers le haut est reconnu`() {
-        assertEquals(
-            GestureType.SWIPE_UP,
-            swipeDirection((0..6).map { 0.5f to 0.70f - it * 0.06f })
-        )
-    }
+        val first = classifier.update(metrics, t, recognized = GestureType.FIST)
+        assertEquals("une seule image a suffi à verrouiller", GestureType.IDLE, first.gesture)
 
-    /**
-     * Un mouvement oblique ne doit produire aucune direction : entre « notifications » et
-     * « application suivante », deviner serait pire que ne rien faire.
-     */
-    @Test
-    fun `un balayage oblique ne produit aucune direction`() {
-        assertNull(swipeDirection((0..6).map { 0.30f + it * 0.06f to 0.30f + it * 0.055f }))
+        var last = first
+        repeat(4) { t += FRAME_MS; last = classifier.update(metrics, t, recognized = GestureType.FIST) }
+        assertEquals(GestureType.FIST, last.gesture)
     }
 
     // --- Robustesse --------------------------------------------------------------------------
@@ -289,14 +221,14 @@ class GestureClassifierTest {
     @Test
     fun `perte breve de la main preserve le geste en cours`() {
         val classifier = GestureClassifier()
-        val (_, t) = feed(classifier, SyntheticHand.twoFingers(), frames = 8)
-        assertEquals(GestureType.TWO_FINGER, classifier.update(null, t + 100).gesture)
+        val (_, t) = feed(classifier, SyntheticHand.pointing(), frames = 8)
+        assertEquals(GestureType.POINT, classifier.update(null, t + 100).gesture)
     }
 
     @Test
     fun `perte prolongee remet la machine a zero`() {
         val classifier = GestureClassifier()
-        val (_, t) = feed(classifier, SyntheticHand.twoFingers(), frames = 8)
+        val (_, t) = feed(classifier, SyntheticHand.pointing(), frames = 8)
         assertEquals(GestureType.IDLE, classifier.update(null, t + 3000).gesture)
     }
 
@@ -315,9 +247,15 @@ class GestureClassifierTest {
         val classifier = GestureClassifier()
         var t = 0L
         repeat(8) { classifier.update(SyntheticHand.metrics(SyntheticHand.pointing()), t); t += FRAME_MS }
-        var result = GestureResult(GestureType.IDLE)
-        repeat(8) { result = classifier.update(SyntheticHand.metrics(SyntheticHand.fist()), t); t += FRAME_MS }
-        assertEquals(GestureType.FIST, result.gesture)
-        assertNotEquals(GestureType.FIST, GestureType.POINT)
+        // On retient l'image de la bascule : c'est la seule où la pose précédente a un sens, et
+        // c'est elle que la politique de commande utilise pour clore un geste en cours.
+        var transition: GestureResult? = null
+        repeat(8) {
+            val r = classifier.update(SyntheticHand.metrics(SyntheticHand.fist()), t)
+            if (r.isNewPose && transition == null) transition = r
+            t += FRAME_MS
+        }
+        assertEquals(GestureType.FIST, transition?.gesture)
+        assertEquals(GestureType.POINT, transition?.previousGesture)
     }
 }

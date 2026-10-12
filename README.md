@@ -19,8 +19,8 @@ HandGestureAnalyzer ......... redressement/miroir de la frame, inférence MediaP
     ▼
 HandGeometry ................ 21 points -> mesures normalisées, invariantes à l'échelle
     │                          (pur Kotlin)
-    ├──▶ GestureClassifier ... machine à états : hystérésis, confirmation temporelle,
-    │                          filtre de qualité, détection de balayage (pur Kotlin)
+    ├──▶ GestureClassifier ... machine à états : trois poses, score avec marge de rejet,
+    │                          confirmation temporelle, filtre de qualité (pur Kotlin)
     └──▶ CursorMapper ........ zone active, correction de gain (pur Kotlin)
               │
               ▼
@@ -55,19 +55,56 @@ Calibration du filtre, mesurée par balayage paramétrique (30 img/s, coordonné
 
 ## Gestes
 
-Les poses sont discriminables par le seul décompte des doigts tendus — le signal le plus robuste
-que fournisse un suivi monoculaire. Deux poses ne différant que par un angle subtil seraient
-confondues dès que la main pivote.
+**Trois poses, et une roue.** Le vocabulaire a compté jusqu'à huit poses, puis six, et restait
+instable. Réduire le nombre ne suffisait pas : le défaut n'était pas la quantité mais le principe
+— distinguer des poses par le nombre de doigts tendus.
 
-| Geste | Action |
+Deux faits condamnent ce principe. Le mode d'échec dominant du suivi monoculaire est l'occlusion
+des doigts par la paume, or les doigts repliés — qui portent toute l'information d'un décompte —
+sont précisément ceux qu'on ne voit pas. Et la main est un continuum : passer d'une pose à une
+autre traverse mécaniquement tous les décomptes intermédiaires, si bien que chaque pose ajoutée
+crée autant d'occasions d'en verrouiller une autre au passage. Les mesures le confirmaient : avec
+six poses, index, poing et pouce levé se tenaient tous à 0,200 du seuil de rejet, le pouce levé
+étant la rivale la plus proche *des deux autres*.
+
+| Pose | Rôle |
 |---|---|
-| Index seul | Déplace le curseur |
-| Pouce + index (pincement) | Clic ; glisser si maintenu |
-| Index + majeur | Défilement vertical |
-| Trois doigts | Applications récentes ; un balayage y navigue |
-| Main ouverte | Lecture / pause du média |
-| Poing | Retour |
-| Pouce levé | Accueil |
+| **Index seul** (1 doigt) | Déplace le curseur. Pouce contre index : clic. Contact maintenu : le doigt se pose et suit la main — défilement, glisser, balayage |
+| **Poing** (0 doigt) | Retour. Pose à tenir : l'anneau du curseur se remplit, changer de pose annule |
+| **Main ouverte** (5 doigts) | Ouvre la roue de commandes |
+
+Les trois formes sont maximalement éloignées, et ce qui compte n'est pas leur nombre mais la
+nature de ce qui les sépare : chaque paire diffère par au moins un **doigt long** passant de
+replié à franchement tendu — jamais par le seul pouce, le plus mal suivi des cinq, ni par une
+extension partielle, du même ordre que le bruit de suivi. Les décomptes intermédiaires — deux,
+trois doigts — ne correspondent plus à aucune pose, donc les traverser ne déclenche rien.
+
+### La roue de commandes
+
+Toutes les autres commandes passent par une roue de huit directions, ouverte par la main ouverte
+et validée par le même clic que partout ailleurs. La tolérance d'une direction est **angulaire** :
+elle ne dépend ni de la taille de l'écran, ni de la distance de la main, ni de sa stabilité.
+
+Par défaut, dans le sens horaire depuis le haut : Accueil, Applications récentes, Application
+suivante, Lecture/pause, Notifications, Réglages rapides, Application précédente, Clavier
+gestuel. Les huit sont réaffectables, comme les trois poses.
+
+Deux conséquences qui ne viennent pas du hasard. **Plus rien à mémoriser** : les commandes sont
+écrites à l'écran, là où un vocabulaire de poses exige de retenir un signe par commande. Et **le
+nombre de commandes cesse de peser sur la fiabilité** : en ajouter une n'ajoute plus une pose à
+distinguer. La roue n'est pas un mode — elle est visible tant que la pose est tenue et disparaît
+dès qu'on la quitte, donc on ne peut pas y rester coincé, et quitter la pose sans valider est la
+façon d'annuler.
+
+### Ce qui a disparu, et pourquoi
+
+- Les **balayages** demandaient un mouvement ample et rapide, indiscernable d'un déplacement de
+  main pressé. La roue fait le même travail en étant plus sûre et visible.
+- Le **pincement comme pose** entrait en conflit direct avec le clic, qui est ce même contact :
+  selon que le contact durait plus ou moins que le verrou temporel, le même geste partait en clic
+  ou en glisser. Le contact est désormais lu uniquement par le détecteur de clic.
+- Le **pouce levé**, le **pouce baissé** et le **« V »** se distinguaient de nos poses par un seul
+  doigt — le pouce, ou un doigt occulté dans le pointage.
 
 ## Contrôle à l'échelle du système
 
@@ -84,6 +121,8 @@ Le service d'accessibilité est le seul moyen pour une application d'agir en deh
 `dispatchGesture` synthétise des appuis n'importe où à l'écran, `performGlobalAction` déclenche
 Retour, Accueil et Récents. La commutation rapide entre applications est un balayage synthétisé
 le long du bord inférieur — le geste de navigation système —, avec l'écran des récents en repli.
+Le contact maintenu, lui, n'est pas traduit en geste reconnu : il ouvre un tracé continu
+(`continueStroke`) que le système interprète lui-même, exactement comme un doigt sur la vitre.
 
 La décision (`GesturePolicy`) est séparée de son exécution : la politique est du Kotlin pur, donc
 vérifiable sans appareil, sans caméra et sans service.
@@ -112,7 +151,7 @@ réellement économisée est affichée dans l'application.
 ## Tests
 
 Les composants de précision, la politique de commande et la régulation de cadence sont couverts
-par 80 tests JVM (exécution en quelques dizaines de
+par 162 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash
@@ -121,22 +160,23 @@ millisecondes, sans appareil) :
 
 `SyntheticHand` génère des poses de main paramétrables (courbure de chaque doigt, écart du
 pincement, échelle, position), ce qui rend les scénarios gestuels parfaitement reproductibles :
-absence de rebond au seuil, unicité du clic, rejet des faux balayages, invariance d'échelle,
-bruit et latence du filtre.
+absence de rebond au seuil, unicité du clic, rejet des poses ambiguës et des décomptes
+intermédiaires, invariance d'échelle, bruit et latence du filtre.
 
 ## Intégration continue
 
-Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble deux
-variantes installables, publiées dans la release `unsigned-latest` :
+Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble la
+variante installable, publiée dans la release `unsigned-latest` :
 
 | Fichier | Minifiée par R8 | Usage |
 |---|---|---|
-| `stark-hud-launcher-release.apk` | oui | l'artefact réel |
-| `stark-hud-launcher-debug.apk` | non | témoin de diagnostic |
+| `nexus-release.apk` | oui | l'artefact installable |
 
-Les deux sont signées avec la clé de debug (`-PstarkDebugSigning=true`) : installables pour
-tester, jamais publiables. Comparer les deux isole immédiatement un problème de minification —
-si le suivi de main marche en debug mais pas en release, il manque une règle de conservation R8.
+Elle est signée avec la clé de debug (`-PstarkDebugSigning=true`) : installable pour tester,
+jamais publiable. Le workflow vérifie au passage que `gesture_recognizer.task` est bien présent
+dans les assets **et** qu'il contient ses deux modèles internes : un modèle manquant ne casse pas
+la compilation, il casse la reconnaissance à l'exécution — c'est-à-dire au seul endroit où le
+défaut ne serait plus détectable automatiquement.
 
 Le tag est glissant : il est recréé sur le commit courant à chaque build, ce qui donne une
 adresse de téléchargement permanente pour la dernière version. Les assets de release sont aussi
@@ -157,5 +197,5 @@ KEY_ALIAS=upload STORE_PASSWORD=... KEY_PASSWORD=... \
 
 - Caméra frontale (l'application reste fonctionnelle en mode tactile/simulation sans caméra)
 - Le service d'accessibilité doit être activé manuellement dans les réglages Android pour que
-  le geste « poing » déclenche le retour système
+  les gestes agissent hors de l'application (retour, appuis, défilement, roue de commandes)
 - Aucune connexion réseau nécessaire : l'inférence est entièrement locale

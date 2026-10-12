@@ -78,10 +78,15 @@ object SyntheticHand {
     fun pointing(cx: Float = 0.5f) =
         build(cx = cx, extension = floatArrayOf(1f, 0f, 0f, 0f))
 
+    /**
+     * Index et majeur tendus. Ce n'est plus une pose du vocabulaire, et la fabrique est conservée
+     * pour cette raison : les tests doivent pouvoir vérifier qu'elle est bien **rejetée**, ce qui
+     * est la garantie que la traverser en ouvrant la main ne déclenche rien.
+     */
     fun twoFingers(cx: Float = 0.5f) =
         build(cx = cx, extension = floatArrayOf(1f, 1f, 0f, 0f))
 
-    /** Poing dont seul le pouce ressort. */
+    /** Poing dont seul le pouce ressort. Également hors vocabulaire, et testé comme tel. */
     fun thumbUp(cx: Float = 0.5f) =
         build(cx = cx, extension = floatArrayOf(0f, 0f, 0f, 0f), thumbCurled = false, pinchDistance = 1.6f)
 

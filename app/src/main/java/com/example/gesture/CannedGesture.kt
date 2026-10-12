@@ -51,21 +51,20 @@ object CannedGesture {
      * `["None", "Closed_Fist", "Open_Palm", "Pointing_Up", "Thumb_Down", "Thumb_Up", "Victory",
      * "ILoveYou"]`.
      *
-     * Trois d'entre elles n'ont pas de correspondance :
+     * Cinq d'entre elles n'ont volontairement **aucune** correspondance, et c'est un choix de
+     * conception et non un oubli :
      *
-     *  - `None` signifie « aucune catégorie », ce qui est une information et non une pose ;
-     *  - `ILoveYou` — pouce, index et auriculaire tendus — demande un contrôle isolé de
-     *    l'auriculaire, précisément ce que l'on a écarté du vocabulaire ;
-     *  - rien ici ne correspond au pointage horizontal, `Pointing_Up` couvrant l'index tendu quelle
-     *    que soit son orientation dans la pratique.
+     *  - `None` signifie « aucune catégorie » : c'est une information, pas une pose ;
+     *  - `Victory`, `Thumb_Up`, `Thumb_Down` et `ILoveYou` désignent des formes que le vocabulaire
+     *    a écartées parce qu'elles se disputaient le voisinage d'une autre.
+     *
+     * Les ignorer ici est ce qui rend ces formes **inertes** : les traverser en changeant de pose
+     * ne produit plus rien, puisque ni le classifieur ni le score géométrique ne leur répondent.
      */
     private val LABELS = mapOf(
         "Closed_Fist" to GestureType.FIST,
         "Open_Palm" to GestureType.OPEN_PALM,
-        "Pointing_Up" to GestureType.POINT,
-        "Thumb_Up" to GestureType.THUMB_UP,
-        "Thumb_Down" to GestureType.THUMB_DOWN,
-        "Victory" to GestureType.TWO_FINGER
+        "Pointing_Up" to GestureType.POINT
     )
 
     /**

@@ -22,14 +22,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -109,6 +105,7 @@ fun StarkControlCenter(
     onToggleEngine: (Boolean) -> Unit,
     onClickTuningChange: (ClickTuning) -> Unit,
     onRebind: (GestureType, BindableAction) -> Unit,
+    onRebindSector: (Int, BindableAction) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val pendingSteps = setupSteps.filterNot { it.isDone }
@@ -148,8 +145,8 @@ fun StarkControlCenter(
 
         item {
             SectionTitle(
-                "Poses",
-                "Fonctionnent partout. Touchez une ligne pour changer son action."
+                "Trois poses",
+                "Zéro, un et cinq doigts. Touchez une ligne pour changer son action."
             )
         }
         item {
@@ -161,15 +158,13 @@ fun StarkControlCenter(
             )
         }
 
-        item { SectionTitle("Balayages", "En pose « V », d'un mouvement franc") }
         item {
-            GestureLegend(
-                docs = SWIPE_DOCS,
-                activeGesture = status.gesture,
-                bindings = bindings,
-                onRebind = onRebind
+            SectionTitle(
+                "Roue de commandes",
+                "Main ouverte, puis une direction. Huit commandes, lisibles à l'écran."
             )
         }
+        item { WheelLegend(bindings = bindings, onRebind = onRebindSector) }
     }
 }
 
@@ -552,51 +547,35 @@ private data class GestureDoc(
     val color: Color
 )
 
+/**
+ * Les trois poses, et rien d'autre.
+ *
+ * Elles sont décrites par le **nombre de doigts tendus** — zéro, un, cinq — parce que c'est à cela
+ * qu'elles se distinguent et que c'est la seule chose à retenir. Les décomptes intermédiaires ne
+ * correspondent à aucune pose : passer de l'une à l'autre ne peut donc rien déclencher au passage.
+ */
 private val POSE_DOCS = listOf(
     GestureDoc(
-        GestureType.POINT, Icons.Default.TouchApp, "Index seul",
+        GestureType.POINT, Icons.Default.TouchApp, "Index seul — 1 doigt",
         "Déplace le curseur. Pouce contre index : clic. Contact maintenu : le doigt se pose " +
             "et suit la main — c'est ce qui fait défiler, glisser et balayer.", StarkCyan
     ),
     GestureDoc(
-        GestureType.TWO_FINGER, Icons.Default.SwapHoriz, "Index + majeur (V)",
-        "Pose de navigation : c'est d'elle que partent les quatre balayages", StarkBlue
+        GestureType.FIST, Icons.Default.ArrowBack, "Poing — 0 doigt",
+        "Main fermée, pouce rentré. Tenez la pose un instant : l'anneau du curseur se remplit " +
+            "avant l'exécution, et changer de pose annule.", StarkRed
     ),
     GestureDoc(
-        GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte",
-        "Les cinq doigts écartés, paume vers la caméra", StarkCyan
-    ),
-    GestureDoc(
-        GestureType.FIST, Icons.Default.ArrowBack, "Poing",
-        "Main fermée, pouce rentré", StarkRed
-    ),
-    GestureDoc(
-        GestureType.THUMB_UP, Icons.Default.Home, "Pouce levé",
-        "Poing fermé, pouce sorti vers le haut", StarkRed
-    ),
-    GestureDoc(
-        GestureType.THUMB_DOWN, Icons.Default.Wifi, "Pouce baissé",
-        "Poing fermé, pouce sorti vers le bas", StarkGold
+        GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte — 5 doigts",
+        "Les cinq doigts écartés, paume vers la caméra. Ouvre la roue : visez une direction, " +
+            "cliquez pour valider. Refermer la main sans cliquer n'exécute rien.", StarkGold
     )
 )
 
-private val SWIPE_DOCS = listOf(
-    GestureDoc(
-        GestureType.SWIPE_LEFT, Icons.Default.ArrowBack, "Balayage à gauche",
-        "En pose « V », d'un geste franc", StarkBlue
-    ),
-    GestureDoc(
-        GestureType.SWIPE_RIGHT, Icons.Default.SwapHoriz, "Balayage à droite",
-        "En pose « V », d'un geste franc", StarkBlue
-    ),
-    GestureDoc(
-        GestureType.SWIPE_UP, Icons.Default.UnfoldMore, "Balayage vers le haut",
-        "En pose « V », main qui remonte", StarkBlue
-    ),
-    GestureDoc(
-        GestureType.SWIPE_DOWN, Icons.Default.Notifications, "Balayage vers le bas",
-        "En pose « V », main qui descend", StarkBlue
-    )
+/** Noms des huit directions de la roue, dans le sens horaire depuis le haut. */
+private val WHEEL_DIRECTIONS = listOf(
+    "Haut", "Haut-droite", "Droite", "Bas-droite",
+    "Bas", "Bas-gauche", "Gauche", "Haut-gauche"
 )
 
 /**
@@ -678,12 +657,86 @@ private fun GestureLegend(
                     )
                     Spacer(Modifier.height(10.dp))
                     ActionPicker(
-                        // Un balayage ne dure qu'une image : les rôles continus ne lui sont pas
-                        // proposés, plutôt que d'être proposés puis ignorés silencieusement.
                         options = BindableAction.assignableTo(doc.gesture),
                         current = bound,
                         onPick = {
                             onRebind(doc.gesture, it)
+                            editing = null
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Les huit directions de la roue, chacune réaffectable.
+ *
+ * Présentées comme des directions et non comme des gestes, parce que c'en sont : il n'y a pas huit
+ * signes à apprendre, il y a une pose et un cadran. C'est ce qui permet d'avoir beaucoup de
+ * commandes sans que leur nombre pèse sur la fiabilité de la reconnaissance.
+ */
+@Composable
+private fun WheelLegend(
+    bindings: GestureBindings,
+    onRebind: (Int, BindableAction) -> Unit
+) {
+    var editing by remember { mutableStateOf<Int?>(null) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        for ((index, bound) in bindings.wheelSlots()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(alpha = 0.04f))
+                    .clickable { editing = if (editing == index) null else index }
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.RadioButtonUnchecked, null,
+                        tint = StarkGold, modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = WHEEL_DIRECTIONS.getOrElse(index) { "Direction $index" },
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = bound.label,
+                            color = StarkGold.copy(alpha = 0.9f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.UnfoldMore,
+                        contentDescription = "Changer l'action",
+                        tint = Color.White.copy(alpha = 0.35f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                if (editing == index) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = bound.description,
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    ActionPicker(
+                        // Un secteur se vise puis se valide : il n'a pas de durée, donc les rôles
+                        // continus ne lui sont pas proposés plutôt que de l'être puis d'être
+                        // ignorés silencieusement.
+                        options = BindableAction.assignableToSector(),
+                        current = bound,
+                        onPick = {
+                            onRebind(index, it)
                             editing = null
                         }
                     )

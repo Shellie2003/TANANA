@@ -355,7 +355,8 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             // ce que l'utilisateur voit se remplir correspond donc exactement à ce qui décide.
             clickProgress = policy.clickProgress,
             holdProgress = policy.holdProgress,
-            visible = state.isHandDetected && state.gesture != GestureType.IDLE
+            visible = state.isHandDetected && state.gesture != GestureType.IDLE,
+            poseProgress = policy.poseProgress
         )
 
         // Clavier ouvert : le curseur ne pilote plus le système mais la sélection des caractères.
@@ -376,6 +377,11 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         )
 
         clickTelemetry = policy.clickTelemetry()
+
+        // La roue suit la pose : elle n'a pas de bascule à gérer, donc rien à synchroniser. On lui
+        // demande son état à chaque image et l'affichage s'aligne — ce qui est précisément ce qui
+        // rend impossible d'y rester coincé.
+        overlayView?.setWheel(policy.wheelState())
 
         for (action in actions) {
             if (action is SystemAction.MoveCursor) continue
@@ -463,6 +469,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         keyboard.reset()
         policy.reset()
         overlayView?.setKeyboard(if (keyboardOpen) keyboard.state() else null)
+        // La roue et le clavier occupent la même couronne : les laisser coexister superposerait
+        // deux menus illisibles.
+        overlayView?.setWheel(null)
         Log.i(TAG, if (keyboardOpen) "Clavier gestuel ouvert" else "Clavier gestuel fermé")
     }
 

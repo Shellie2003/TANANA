@@ -10,6 +10,7 @@ import android.os.SystemClock
 import android.view.View
 import com.example.control.TargetSnapper
 import com.example.gesture.GestureType
+import com.example.input.CommandWheel
 import com.example.input.RadialKeyboard
 import kotlin.math.PI
 import kotlin.math.cos
@@ -70,6 +71,12 @@ class CursorOverlayView(context: Context) : View(context) {
     /** État du clavier radial, ou null quand il est fermé. */
     private var keyboard: RadialKeyboard.State? = null
 
+    /** État de la roue de commandes, ou null quand sa pose n'est pas tenue. */
+    private var wheel: CommandWheel.State? = null
+
+    /** Progression du maintien de pose, 0..1 : annonce l'action ponctuelle à venir. */
+    private var poseProgress = 0f
+
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
         textSize = 17f * density
@@ -85,6 +92,20 @@ class CursorOverlayView(context: Context) : View(context) {
         invalidate()
     }
 
+    /**
+     * Affiche ou masque la roue de commandes.
+     *
+     * Elle n'est pas un mode qu'on ouvre et qu'on ferme : elle suit la pose, donc cette méthode est
+     * appelée à chaque image. Comparer avant d'invalider évite de redessiner tout l'écran pour un
+     * état identique — ce qui, sur une fenêtre de superposition, coûte directement du GPU à
+     * l'application au premier plan.
+     */
+    fun setWheel(state: CommandWheel.State?) {
+        if (state == wheel) return
+        wheel = state
+        invalidate()
+    }
+
     /** Met à jour l'état affiché. Appelée depuis le thread principal. */
     fun update(
         x: Float,
@@ -92,7 +113,8 @@ class CursorOverlayView(context: Context) : View(context) {
         gesture: GestureType,
         clickProgress: Float,
         holdProgress: Float,
-        visible: Boolean
+        visible: Boolean,
+        poseProgress: Float = 0f
     ) {
         // Une fenêtre de superposition invalidée en continu fait recomposer tout l'écran par le
         // compositeur, y compris l'application au premier plan. Quand le curseur est masqué et
@@ -104,6 +126,7 @@ class CursorOverlayView(context: Context) : View(context) {
         this.clickProgress = clickProgress
         this.holdProgress = holdProgress
         this.visible = visible
+        this.poseProgress = poseProgress
         if (unchanged) return
 
         rotation = (rotation + 2f) % 360f
@@ -143,6 +166,7 @@ class CursorOverlayView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         keyboard?.let { drawKeyboard(canvas, it) }
+        wheel?.let { drawWheel(canvas, it) }
         drawTapRipple(canvas)
         if (!visible) return
 
@@ -198,6 +222,14 @@ class CursorOverlayView(context: Context) : View(context) {
         // plutôt qu'un seul réutilisé, sans quoi on ne saurait pas lequel des deux se remplit.
         if (holdProgress > 0.02f) {
             drawContrastedArc(canvas, cx, cy, radius * 1.85f, holdProgress, COLOR_RED)
+        }
+
+        // Troisième arc, le plus intérieur : le maintien de la pose avant qu'une action ponctuelle
+        // ne s'exécute. C'est ce qui rend le délai acceptable plutôt que subi — sans lui,
+        // l'application semblerait simplement lente à répondre, et l'on ne saurait pas qu'il reste
+        // la possibilité d'annuler en changeant de pose.
+        if (poseProgress > 0.02f) {
+            drawContrastedArc(canvas, cx, cy, radius * 0.72f, poseProgress, COLOR_BLUE)
         }
     }
 
@@ -273,55 +305,129 @@ class CursorOverlayView(context: Context) : View(context) {
      * sélection insensible à la précision du pointage.
      */
     private fun drawKeyboard(canvas: Canvas, state: RadialKeyboard.State) {
+        drawRadialMenu(
+            canvas = canvas,
+            labels = state.labels,
+            hovered = state.hoveredSector,
+            progress = state.progress,
+            footer = if (state.level == RadialKeyboard.Level.GROUP) "GROUPE" else "LETTRE",
+            dim = 0.82f,
+            bubbleDp = 30f
+        )
+    }
+
+    /**
+     * Roue de commandes : la même couronne que le clavier, avec des libellés plus longs.
+     *
+     * Le voile est volontairement plus léger que celui du clavier : on écrit longuement dans le
+     * clavier, et le contenu en dessous n'a pas d'importance, alors que la roue sert à agir **sur**
+     * ce qui est affiché — masquer l'écran empêcherait de voir sur quoi on agit. Les pastilles sont
+     * plus larges parce que les libellés sont des mots et non des lettres.
+     */
+    private fun drawWheel(canvas: Canvas, state: CommandWheel.State) {
+        drawRadialMenu(
+            canvas = canvas,
+            labels = state.labels,
+            hovered = state.hoveredSector,
+            progress = state.progress,
+            footer = null,
+            dim = 0.45f,
+            bubbleDp = 46f
+        )
+    }
+
+    /**
+     * Couronne de huit secteurs : forme commune au clavier gestuel et à la roue de commandes.
+     *
+     * Les libellés sont placés à distance fixe du centre, dans la direction de leur secteur. Rien
+     * n'est aligné sur une grille : la cible n'est pas la pastille dessinée mais la *direction*
+     * qu'elle indique, et le secteur s'étend donc jusqu'au bord de l'écran. C'est ce qui rend la
+     * sélection insensible à la précision du pointage.
+     *
+     * Un libellé de plusieurs mots est coupé en deux lignes : écrit sur une seule, il chevaucherait
+     * ses voisins, et un menu illisible ne vaut pas mieux qu'un geste à mémoriser.
+     */
+    private fun drawRadialMenu(
+        canvas: Canvas,
+        labels: List<String>,
+        hovered: Int,
+        progress: Float,
+        footer: String?,
+        dim: Float,
+        bubbleDp: Float
+    ) {
         val cx = width / 2f
         val cy = height / 2f
         val radius = minOf(width, height) * 0.34f
 
-        // Voile sombre : le clavier doit dominer le contenu sous-jacent pour rester lisible.
-        dimPaint.color = withAlpha(0xFF040814.toInt(), 0.82f)
+        dimPaint.color = withAlpha(0xFF040814.toInt(), dim)
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
 
         // Zone morte centrale, où ramener la main sans rien sélectionner.
         ringPaint.color = withAlpha(COLOR_CYAN, 0.35f)
         canvas.drawCircle(cx, cy, radius * 0.34f, ringPaint)
 
-        for (sector in state.labels.indices) {
-            val angle = (sector + 0.5) * (2 * PI / RadialKeyboard.SECTORS)
+        for (sector in labels.indices) {
+            val angle = (sector + 0.5) * (2 * PI / SECTORS)
             val x = cx + (sin(angle) * radius).toFloat()
             val y = cy - (cos(angle) * radius).toFloat()
-            val active = sector == state.hoveredSector
+            val active = sector == hovered
 
-            val bubble = 30f * density
+            val bubble = bubbleDp * density
             sectorPaint.color = withAlpha(if (active) COLOR_GOLD else COLOR_CYAN, if (active) 0.28f else 0.10f)
             canvas.drawCircle(x, y, bubble, sectorPaint)
 
-            if (active && state.progress > 0f) {
+            if (active && progress > 0f) {
                 // Arc de progression : la validation est annoncée avant de partir.
                 strengthPaint.color = COLOR_GOLD
+                strengthPaint.strokeWidth = ARC_WIDTH_DP * density
                 canvas.drawArc(
                     x - bubble, y - bubble, x + bubble, y + bubble,
-                    -90f, 360f * state.progress, false, strengthPaint
+                    -90f, 360f * progress, false, strengthPaint
                 )
             }
 
-            val label = state.labels[sector]
-            labelPaint.color = if (active) COLOR_GOLD else 0xFFFFFFFF.toInt()
-            labelPaint.getTextBounds(label, 0, label.length, textBounds)
-            canvas.drawText(label, x, y + textBounds.height() / 2f, labelPaint)
+            labelPaint.color = if (active) COLOR_GOLD else COLOR_CORE
+            drawWrappedLabel(canvas, labels[sector], x, y, bubble * 1.9f)
         }
 
-        // Rappel du niveau courant.
-        labelPaint.color = withAlpha(COLOR_CYAN, 0.75f)
-        canvas.drawText(
-            if (state.level == RadialKeyboard.Level.GROUP) "GROUPE" else "LETTRE",
-            cx, cy + 6f * density, labelPaint
-        )
+        footer?.let {
+            labelPaint.color = withAlpha(COLOR_CYAN, 0.75f)
+            canvas.drawText(it, cx, cy + 6f * density, labelPaint)
+        }
     }
 
+    /** Libellé centré, coupé sur l'espace le plus proche du milieu s'il est trop large. */
+    private fun drawWrappedLabel(canvas: Canvas, label: String, x: Float, y: Float, maxWidth: Float) {
+        labelPaint.getTextBounds(label, 0, label.length, textBounds)
+        val lineHeight = textBounds.height().toFloat()
+
+        if (labelPaint.measureText(label) <= maxWidth || !label.contains(' ')) {
+            canvas.drawText(label, x, y + lineHeight / 2f, labelPaint)
+            return
+        }
+
+        val middle = label.length / 2
+        val cut = label.indices
+            .filter { label[it] == ' ' }
+            .minBy { kotlin.math.abs(it - middle) }
+
+        val gap = lineHeight * 1.35f
+        canvas.drawText(label.substring(0, cut), x, y - gap / 2f + lineHeight / 2f, labelPaint)
+        canvas.drawText(label.substring(cut + 1), x, y + gap / 2f + lineHeight / 2f, labelPaint)
+    }
+
+    /**
+     * Couleur d'accent de la pose courante.
+     *
+     * Trois poses, trois couleurs, et c'est tout le vocabulaire : le cyan pointe et clique, le
+     * rouge marque la pose qui exécute une action, l'or celle qui ouvre la roue. Les couleurs ne
+     * sont pas décoratives — elles disent dans quel mode on se trouve, et c'est la seule
+     * information que le curseur ne peut pas porter par sa forme.
+     */
     private fun colorFor(gesture: GestureType): Int = when (gesture) {
-        GestureType.FIST, GestureType.THUMB_UP -> COLOR_RED
-        GestureType.THUMB_DOWN -> COLOR_GOLD
-        GestureType.TWO_FINGER -> COLOR_BLUE
+        GestureType.FIST -> COLOR_RED
+        GestureType.OPEN_PALM -> COLOR_GOLD
         else -> COLOR_CYAN
     }
 
@@ -358,6 +464,13 @@ class CursorOverlayView(context: Context) : View(context) {
          * expression lue à chaque image.
          */
         const val TAP_RIPPLE_MS = 320L
+
+        /**
+         * Nombre de secteurs de la couronne. Le clavier et la roue en comptent huit : c'est le
+         * maximum qui laisse à chaque direction 45° de tolérance, soit assez pour qu'une main qui
+         * tremble reste dans son secteur.
+         */
+        val SECTORS = minOf(RadialKeyboard.SECTORS, CommandWheel.SECTORS)
 
         const val COLOR_CYAN = 0xFF00F0FF.toInt()
         const val COLOR_GOLD = 0xFFFFB703.toInt()

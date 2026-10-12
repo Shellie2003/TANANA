@@ -1,67 +1,60 @@
 package com.example.gesture
 
-import kotlin.math.abs
 
 /**
- * Vocabulaire gestuel.
+ * Vocabulaire gestuel : **trois formes de main, et rien d'autre**.
  *
- * ## Pourquoi cinq poses, et celles-ci
+ * ## Pourquoi trois, et pourquoi celles-ci
  *
- * Le vocabulaire en a compté huit, et il était instable à l'usage. La cause n'était pas le
- * classifieur mais le choix des poses, et deux constats la cernent.
+ * Le vocabulaire a compté jusqu'à huit poses, puis six, et restait instable. Réduire le nombre ne
+ * suffisait pas, parce que le défaut n'était pas la quantité mais le **principe** : distinguer des
+ * poses par le nombre de doigts tendus.
  *
- * Le premier vient du suivi lui-même : le mode d'échec dominant de MediaPipe est l'occlusion des
- * doigts par la paume vue de la caméra. Or c'est exactement ce que produit un décompte de doigts —
- * les doigts repliés disparaissent derrière la paume, et ce sont eux qui portent l'information.
- * Plus une pose replie de doigts, moins elle est fiable, ce qui condamne l'idée même de compter.
+ * Deux faits condamnent ce principe. Le mode d'échec dominant du suivi est l'occlusion des doigts
+ * par la paume vue de la caméra — or les doigts repliés, qui portent toute l'information d'un
+ * décompte, sont précisément ceux qu'on ne voit pas. Et la main est un continuum : passer d'une
+ * pose à une autre traverse mécaniquement tous les décomptes intermédiaires, si bien que chaque
+ * pose ajoutée crée autant d'occasions d'en verrouiller une autre au passage.
  *
- * Le second est anatomique : l'annulaire ne se replie pas indépendamment du majeur et de
- * l'auriculaire, leurs tendons fléchisseurs étant couplés. La pose « trois doigts » demandait donc
- * un mouvement que la plupart des mains ne peuvent pas produire proprement, et l'auriculaire seul
- * comme le signe « cornes » exigeaient un contrôle isolé du plus petit et du plus mal suivi des
- * doigts.
+ * Les mesures le montraient sans ambiguïté. Avec six poses, trois d'entre elles — index, poing,
+ * pouce levé — se tenaient toutes à 0,200 du seuil de rejet, le pouce levé étant la rivale la plus
+ * proche des deux autres. Et ouvrir la main depuis le pointage traversait une bande où la marge
+ * tombait à 0,073.
  *
- * Les cinq poses retenues sont exactement celles du jeu canonique de MediaPipe — poing, main
- * ouverte, index pointé, pouce levé, « V » — c'est-à-dire celles sur lesquelles le modèle a été
- * entraîné et mesuré. Écarter les trois autres a fait passer la marge minimale du vocabulaire de
- * 0,130 à 0,200, et celle de la main ouverte de 0,250 à 0,500.
+ * Les trois formes retenues sont **maximalement éloignées** : zéro doigt, un doigt, cinq doigts.
+ * Aucune paire ne se distingue par le seul pouce, ni par une extension partielle : ce qui les
+ * sépare est toujours un doigt long passant de replié à franchement tendu. Et surtout, les
+ * décomptes intermédiaires — deux, trois doigts — ne sont plus des poses, donc les traverser ne
+ * peut plus rien déclencher. C'est ce qui supprime le conflit à la racine plutôt que de le
+ * repousser derrière un seuil.
  *
- * Le vocabulaire n'a pas rétréci pour autant : les commandes libérées passent aux balayages, qui
- * ne dépendent d'aucun doigt replié, et au contact du pouce, qui est un signal orthogonal.
+ * ## Ce qui remplace les poses supprimées
+ *
+ * Rien n'est perdu, parce que les commandes ne passent plus par des poses. Deux canaux les
+ * portent, et tous deux sont indépendants de la forme de la main :
+ *
+ *  - **le contact du pouce**, orthogonal à la position de l'index : clic, et doigt posé qui suit
+ *    la main pour défiler, glisser et balayer ;
+ *  - **la direction**, dont la tolérance est angulaire et ne dépend ni de la taille de l'écran ni
+ *    de la stabilité de la main. La main ouverte ouvre une roue de huit commandes, lisibles à
+ *    l'écran : il n'y a donc plus rien à mémoriser.
+ *
+ * Les balayages disparaissent avec le « V » qui les portait. Ils demandaient un mouvement ample et
+ * rapide, donc indiscernable d'un déplacement de main pressé, et la roue fait le même travail en
+ * étant à la fois plus sûre et visible.
  */
 enum class GestureType {
     /** Aucune main exploitable. */
     IDLE,
 
-    /** Index seul tendu. Pilote le curseur. */
+    /** Index seul tendu. Pilote le curseur, et le pouce agit. */
     POINT,
-
-    /** Index et majeur tendus — le « V ». Pose de navigation : c'est de là que partent les balayages. */
-    TWO_FINGER,
-
-    /** Main grande ouverte. Lecture / pause du média en cours. */
-    OPEN_PALM,
 
     /** Poing fermé. Retour. */
     FIST,
 
-    /** Pouce seul tendu. Accueil. */
-    THUMB_UP,
-
-    /**
-     * Pouce seul tendu vers le bas.
-     *
-     * Cette pose n'est atteignable que par le classifieur entraîné : notre score géométrique ne
-     * mesure que l'extension des doigts, pas leur orientation, et ne saurait donc pas la
-     * distinguer du pouce levé.
-     */
-    THUMB_DOWN,
-
-    /** Balayages, émis comme évènements ponctuels sur les quatre directions. */
-    SWIPE_LEFT,
-    SWIPE_RIGHT,
-    SWIPE_UP,
-    SWIPE_DOWN
+    /** Main grande ouverte. Ouvre la roue de commandes. */
+    OPEN_PALM
 }
 
 /** Résultat d'une passe de classification. */
@@ -73,25 +66,12 @@ data class GestureResult(
     val isNewPose: Boolean = false,
     /** Confiance globale 0..1 (qualité géométrique x stabilité temporelle). */
     val confidence: Float = 0f,
-    /** Vrai uniquement sur la frame où un balayage est émis. */
-    val isSwipeEvent: Boolean = false
 )
 
 /** Seuils du classifieur. Extraits en data class pour être ajustables et testables. */
 data class GestureConfig(
     // Nombre de frames consécutives requises pour valider un changement de pose.
     val framesToLatch: Int = 3,
-    // Balayage.
-    val swipeWindowMs: Long = 400L,
-    val swipeMinDistance: Float = 0.20f,
-    val swipeMinVelocity: Float = 0.80f,
-    /**
-     * Rapport maximal entre l'axe secondaire et l'axe principal. Un balayage doit être franchement
-     * aligné : c'est ce qui empêche un mouvement oblique de produire une direction au hasard, et
-     * donc de confondre « notifications » avec « application suivante ».
-     */
-    val swipeMaxCrossRatio: Float = 0.6f,
-    val swipeCooldownMs: Long = 600L,
     // En deçà de cette qualité géométrique, aucune action n'est déclenchée.
     val minQuality: Float = 0.35f,
     // Perte de main tolérée avant remise à zéro complète.
@@ -130,19 +110,12 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
     var poseMargin: Float = 0f
         private set
 
-    private val historyTimes = ArrayDeque<Long>()
-    private val historyX = ArrayDeque<Float>()
-    private val historyY = ArrayDeque<Float>()
-    private var lastSwipeTime = Long.MIN_VALUE
     private var lastSeenTime = Long.MIN_VALUE
 
     fun reset() {
         latchedPose = GestureType.IDLE
         candidatePose = GestureType.IDLE
         candidateFrames = 0
-        historyTimes.clear()
-        historyX.clear()
-        historyY.clear()
     }
 
     /**
@@ -191,21 +164,15 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
         val poseChanged = candidateFrames >= config.framesToLatch && latchedPose != candidatePose
         if (poseChanged) latchedPose = candidatePose
 
-        // Les balayages partent de la pose en « V », qui leur est dédiée : aucune action ponctuelle
-        // ne lui est associée, si bien qu'entrer dans la pose pour balayer ne déclenche rien.
-        pushHistory(timestampMs, metrics.pointerX, metrics.pointerY)
-        val swipe = detectSwipe(timestampMs, allowed = latchedPose == GestureType.TWO_FINGER)
-
         // La confiance chute pendant une transition de pose : une action déclenchée à cet instant
         // serait probablement une pose intermédiaire mal interprétée.
         val stability = if (candidateFrames >= config.framesToLatch) 1f else 0.6f
 
         return GestureResult(
-            gesture = swipe ?: latchedPose,
+            gesture = latchedPose,
             previousGesture = previous,
-            isNewPose = poseChanged || swipe != null,
-            confidence = (metrics.quality * stability).coerceIn(0f, 1f),
-            isSwipeEvent = swipe != null
+            isNewPose = poseChanged,
+            confidence = (metrics.quality * stability).coerceIn(0f, 1f)
         )
     }
 
@@ -228,71 +195,5 @@ class GestureClassifier(private val config: GestureConfig = GestureConfig()) {
         // null = observation ambiguë. On conserve la pose courante : c'est précisément ce
         // refus de trancher qui supprime les conflits entre signes voisins.
         return scorer.classify(m) ?: latchedPose
-    }
-
-    private fun pushHistory(timestampMs: Long, x: Float, y: Float) {
-        historyTimes.addLast(timestampMs)
-        historyX.addLast(x)
-        historyY.addLast(y)
-        while (historyTimes.isNotEmpty() &&
-            timestampMs - historyTimes.first() > config.swipeWindowMs
-        ) {
-            historyTimes.removeFirst()
-            historyX.removeFirst()
-            historyY.removeFirst()
-        }
-    }
-
-    /**
-     * Un balayage n'est reconnu que si le mouvement est **à la fois** ample, rapide, franchement
-     * aligné sur un axe et cohérent en direction. Exiger les quatre critères simultanément
-     * supprime les déclenchements accidentels quand la main entre ou sort du champ.
-     *
-     * Les quatre directions sont traitées par le même code : l'axe dominant est choisi d'abord,
-     * puis les critères sont appliqués à cet axe. Deux implémentations parallèles auraient
-     * fatalement divergé, et les balayages verticaux se seraient comportés autrement que les
-     * horizontaux sans qu'aucun test ne le signale.
-     */
-    private fun detectSwipe(now: Long, allowed: Boolean): GestureType? {
-        if (!allowed) return null
-        if (historyTimes.size < 3) return null
-        if (lastSwipeTime != Long.MIN_VALUE && now - lastSwipeTime < config.swipeCooldownMs) return null
-
-        val dtMs = historyTimes.last() - historyTimes.first()
-        if (dtMs <= 0) return null
-
-        val dx = historyX.last() - historyX.first()
-        val dy = historyY.last() - historyY.first()
-
-        val horizontal = abs(dx) >= abs(dy)
-        val main = if (horizontal) dx else dy
-        val cross = if (horizontal) dy else dx
-        val samples = if (horizontal) historyX.toList() else historyY.toList()
-
-        if (abs(main) < config.swipeMinDistance) return null
-        if (abs(cross) > abs(main) * config.swipeMaxCrossRatio) return null
-        if (abs(main) / (dtMs / 1000f) < config.swipeMinVelocity) return null
-
-        // Cohérence de direction : distingue un balayage franc d'un aller-retour.
-        val sign = if (main > 0) 1f else -1f
-        var coherent = 0
-        for (i in 1 until samples.size) {
-            if ((samples[i] - samples[i - 1]) * sign >= -0.005f) coherent++
-        }
-        val steps = samples.size - 1
-        if (steps <= 0 || coherent.toFloat() / steps < 0.75f) return null
-
-        lastSwipeTime = now
-        historyTimes.clear()
-        historyX.clear()
-        historyY.clear()
-
-        return when {
-            horizontal && main > 0 -> GestureType.SWIPE_RIGHT
-            horizontal -> GestureType.SWIPE_LEFT
-            // L'axe Y de l'image croît vers le bas : une main qui monte produit un delta négatif.
-            main > 0 -> GestureType.SWIPE_DOWN
-            else -> GestureType.SWIPE_UP
-        }
     }
 }

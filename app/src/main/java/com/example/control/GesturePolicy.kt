@@ -2,7 +2,7 @@ package com.example.control
 
 import com.example.gesture.ClickDetector
 import com.example.gesture.GestureType
-import kotlin.math.abs
+import com.example.input.CommandWheel
 import kotlin.math.hypot
 
 /**
@@ -24,10 +24,13 @@ import kotlin.math.hypot
  *
  * ## Principes
  *
- *  - **Les actions ponctuelles ne se déclenchent qu'au front montant de la pose.** Maintenir un
- *    poing produit un seul retour, pas trente par seconde.
- *  - **Les actions continues sont relatives.** Défilement et glisser suivent le *déplacement* de
- *    la main, jamais sa position absolue : la main n'a pas besoin d'être à un endroit particulier.
+ *  - **Une action ponctuelle demande une pose tenue, pas un front montant.** Elle partait
+ *    auparavant dès que la pose basculait, ce qui en faisait l'otage de la moindre erreur de
+ *    classification : une image mal lue suffisait à déclencher un retour. Elle exige désormais que
+ *    la pose soit maintenue ([Config.poseConfirmMs]), et la progression est affichée autour du
+ *    curseur — on voit donc venir l'action, et quitter la pose l'annule sans rien exécuter.
+ *  - **Elle ne se répète pas tant que la pose est tenue.** Maintenir un poing produit un seul
+ *    retour, pas trente par seconde.
  *
  * Kotlin pur, sans dépendance Android : entièrement testable en JVM.
  */
@@ -37,10 +40,16 @@ class GesturePolicy(
 ) {
 
     data class Config(
-        /** Gain du défilement : un déplacement de main de f fait défiler f x scrollGain. */
-        val scrollGain: Float = 1.6f,
-        /** Déplacement minimal avant d'émettre un défilement, pour ignorer le tremblement. */
-        val scrollThreshold: Float = 0.012f,
+        /**
+         * Durée pendant laquelle une pose doit être tenue avant que son action ponctuelle ne
+         * s'exécute.
+         *
+         * C'est la garantie la plus utile du vocabulaire réduit : une action irréversible — retour,
+         * accueil — ne peut plus partir d'une seule image mal classée, et l'anneau de progression
+         * laisse le temps de se rétracter. Le coût, un tiers de seconde, ne se paie que sur les
+         * actions ponctuelles ; le curseur et la roue restent instantanés.
+         */
+        val poseConfirmMs: Long = 350L,
         /** Intervalle minimal entre deux actions ponctuelles identiques. */
         val actionCooldownMs: Long = 700L,
         /** En deçà de ce déplacement, un pincement relâché est un appui ; au-delà, un glisser. */
@@ -59,17 +68,25 @@ class GesturePolicy(
     )
 
     private var lastPose = GestureType.IDLE
-    private var dragging = false
     private var dragStartX = 0f
     private var dragStartY = 0f
     private var dragStartedAt = 0L
 
-    private var anchorX = 0f
-    private var anchorY = 0f
-    private var hasAnchor = false
-
     private val lastActionAt = HashMap<String, Long>()
     private var clickDetector = ClickDetector()
+    private val wheel = CommandWheel()
+
+    // Maintien de pose exigé avant toute action ponctuelle.
+    private var poseSince = Long.MIN_VALUE
+    private var poseConsumed = false
+
+    /** Vrai tant que la roue de commandes est ouverte, c'est-à-dire tant que sa pose est tenue. */
+    var wheelOpen: Boolean = false
+        private set
+
+    /** Progression du maintien de pose, 0..1 : annonce l'action ponctuelle à venir. */
+    var poseProgress: Float = 0f
+        private set
 
     // État du clic par immobilité.
     private var dwellX = 0f
@@ -168,8 +185,11 @@ class GesturePolicy(
 
     fun reset() {
         lastPose = GestureType.IDLE
-        dragging = false
-        hasAnchor = false
+        poseSince = Long.MIN_VALUE
+        poseConsumed = false
+        poseProgress = 0f
+        wheelOpen = false
+        wheel.reset()
         lastActionAt.clear()
         clickDetector.reset()
         resetDwell()
@@ -199,37 +219,19 @@ class GesturePolicy(
     ): List<SystemAction> {
         val actions = mutableListOf<SystemAction>()
 
-        // Le pincement se résout à son relâchement, comme un clic de souris : immobile et bref
-        // c'est un appui, immobile et long un appui long, déplacé un glisser.
-        if (dragging && bindings[gesture] != BindableAction.DRAG) {
-            dragging = false
-            val travel = hypot(cursorX - dragStartX, cursorY - dragStartY)
-            val heldMs = timestampMs - dragStartedAt
-            actions += when {
-                travel >= config.tapMaxTravel ->
-                    SystemAction.Drag(dragStartX, dragStartY, cursorX, cursorY)
-                heldMs >= config.longPressMs -> SystemAction.LongPress(dragStartX, dragStartY)
-                else -> SystemAction.Tap(dragStartX, dragStartY)
-            }
-        }
-
-        // La référence d'un geste continu est réarmée à chaque changement de pose : sans cela, le
-        // déplacement effectué dans la pose précédente serait consommé d'un bloc.
-        //
-        // Un balayage est explicitement exclu de ce réarmement. Il ne remplace pas la pose tenue,
-        // il la traverse : réarmer sur son passage ferait perdre au défilement en cours sa
-        // référence, et l'image suivante repartirait d'un saut.
-        if (gesture != lastPose && !GestureBindings.isSwipe(gesture)) {
-            hasAnchor = false
+        // Changement de pose : tout état lié à la pose précédente est réarmé. Sans cela, la
+        // progression déjà accumulée serait créditée à la nouvelle pose, qui s'exécuterait
+        // aussitôt — précisément ce que le maintien est censé empêcher.
+        if (gesture != lastPose) {
+            poseSince = timestampMs
+            poseConsumed = false
+            poseProgress = 0f
+            wheel.reset()
             resetDwell()
         }
 
-        // Un balayage est un évènement sans durée : il ne peut pas porter un rôle continu, qui
-        // n'aurait aucune image suivante sur laquelle s'exercer. Une configuration qui en
-        // demanderait un est neutralisée ici plutôt que de produire un curseur d'une seule frame.
-        val binding = bindings[gesture].let {
-            if (GestureBindings.isSwipe(gesture) && it.isContinuous) BindableAction.NONE else it
-        }
+        val binding = bindings[gesture]
+        wheelOpen = binding == BindableAction.COMMAND_WHEEL
 
         when (binding) {
             BindableAction.CURSOR -> {
@@ -238,45 +240,47 @@ class GesturePolicy(
                 dwell(cursorX, cursorY, timestampMs)?.let { actions += it }
             }
 
-            BindableAction.DRAG -> {
-                if (isNewPose) {
-                    dragStartX = cursorX
-                    dragStartY = cursorY
-                    dragStartedAt = timestampMs
-                    dragging = true
-                    actions += SystemAction.DragStart(cursorX, cursorY)
-                } else if (dragging) {
-                    actions += SystemAction.DragMove(cursorX, cursorY)
-                }
-            }
-
-            BindableAction.SCROLL -> {
-                relativeMove(cursorY, isVertical = true)?.let {
-                    actions += SystemAction.Scroll(it)
-                }
-            }
-
-            BindableAction.SCROLL_HORIZONTAL -> {
-                relativeMove(cursorX, isVertical = false)?.let {
-                    actions += SystemAction.ScrollHorizontal(it)
+            // La roue est tenue ouverte par la pose : on y vise une direction, et le même geste de
+            // clic que partout ailleurs la valide. Quitter la pose sans cliquer n'exécute rien,
+            // c'est la façon d'annuler — et c'est pourquoi on ne peut pas y rester coincé.
+            BindableAction.COMMAND_WHEEL -> {
+                val event = clickDetector.update(pinchRatio, cursorX, cursorY, timestampMs)
+                val sector = wheel.update(
+                    cursorX = cursorX,
+                    cursorY = cursorY,
+                    nowMs = timestampMs,
+                    commit = event == ClickDetector.Event.CLICK,
+                    clickProgress = clickDetector.travelProgress
+                )
+                if (sector != null) {
+                    val bound = bindings.sector(sector)
+                    if (bound != BindableAction.NONE) {
+                        emitOnce(actions, "wheel$sector", bound.action, timestampMs)
+                    }
                 }
             }
 
             BindableAction.NONE -> Unit
 
-            // Toutes les autres associations sont des actions ponctuelles.
-            else -> if (isNewPose) {
-                emitOnce(actions, binding.id, binding.action, timestampMs)
+            // Toutes les autres associations sont des actions ponctuelles, soumises au maintien.
+            else -> {
+                val elapsed = timestampMs - poseSince
+                poseProgress = (elapsed.toFloat() / config.poseConfirmMs).coerceIn(0f, 1f)
+                if (!poseConsumed && elapsed >= config.poseConfirmMs) {
+                    poseConsumed = true
+                    emitOnce(actions, binding.id, binding.action, timestampMs)
+                }
             }
         }
 
-        // Un balayage traverse la pose tenue sans la remplacer : la mémoriser comme pose courante
-        // ferait réarmer les gestes continus à chaque balayage, et le défilement repartirait de
-        // zéro juste après. La pose sous-jacente est donc conservée.
-        if (!GestureBindings.isSwipe(gesture)) lastPose = gesture
+        lastPose = gesture
 
         return actions
     }
+
+    /** État de la roue pour l'affichage, ou null quand elle n'est pas ouverte. */
+    fun wheelState(): CommandWheel.State? =
+        if (wheelOpen) wheel.state(bindings.wheelLabels()) else null
 
     /**
      * Détection du clic seule, sans traduction en action système.
@@ -361,24 +365,6 @@ class GesturePolicy(
         dwellConsumed = true
         dwellProgress = 1f
         return SystemAction.Tap(dwellX, dwellY)
-    }
-
-    /** Déplacement relatif depuis la dernière référence, ou null si sous le seuil de bruit. */
-    private fun relativeMove(value: Float, isVertical: Boolean): Float? {
-        val anchor = if (isVertical) anchorY else anchorX
-        if (!hasAnchor) {
-            anchorX = value
-            anchorY = value
-            hasAnchor = true
-            return null
-        }
-
-        val delta = value - anchor
-        if (abs(delta) < config.scrollThreshold) return null
-
-        if (isVertical) anchorY = value else anchorX = value
-        // Le contenu suit la main : monter la main fait remonter le contenu.
-        return -delta * config.scrollGain
     }
 
     /**

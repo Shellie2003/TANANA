@@ -32,13 +32,24 @@ class CannedGestureTest {
     }
 
     @Test
-    fun `les poses du vocabulaire sont reconnues`() {
+    fun `les trois poses du vocabulaire sont reconnues`() {
         assertEquals(GestureType.FIST, CannedGesture.from("Closed_Fist", confident))
         assertEquals(GestureType.OPEN_PALM, CannedGesture.from("Open_Palm", confident))
         assertEquals(GestureType.POINT, CannedGesture.from("Pointing_Up", confident))
-        assertEquals(GestureType.THUMB_UP, CannedGesture.from("Thumb_Up", confident))
-        assertEquals(GestureType.THUMB_DOWN, CannedGesture.from("Thumb_Down", confident))
-        assertEquals(GestureType.TWO_FINGER, CannedGesture.from("Victory", confident))
+    }
+
+    /**
+     * Le classifieur sait reconnaître le « V », le pouce levé et le pouce baissé. Ne pas les
+     * traduire est un choix, pas un oubli : ces trois formes se distinguent de nos poses par un
+     * seul doigt — le plus mal suivi pour les pouces, un doigt occulté pour le « V » — et c'est
+     * exactement ce qui rendait le vocabulaire instable. Les laisser entrer par le classifieur
+     * réintroduirait le conflit que la réduction du vocabulaire a supprimé.
+     */
+    @Test
+    fun `les categories ecartees du vocabulaire ne produisent aucune pose`() {
+        assertNull(CannedGesture.from("Thumb_Up", confident))
+        assertNull(CannedGesture.from("Thumb_Down", confident))
+        assertNull(CannedGesture.from("Victory", confident))
     }
 
     /**
@@ -65,12 +76,19 @@ class CannedGestureTest {
     }
 
     /**
-     * Le pouce baissé n'existe que par le classifieur : le score géométrique ne mesure que
-     * l'extension des doigts, pas leur orientation, et ne peut donc pas le distinguer du pouce
-     * levé. Aucun modèle géométrique ne doit prétendre le reconnaître.
+     * Les deux voies de reconnaissance — classifieur entraîné et score géométrique — doivent
+     * couvrir **exactement** le même vocabulaire.
+     *
+     * C'est la propriété qui empêche la refonte de se défaire en silence. Si le classifieur
+     * reconnaissait une pose que la géométrie ignore, cette pose apparaîtrait de façon
+     * intermittente, selon que le classifieur se prononce ou s'abstient — c'est-à-dire de la
+     * manière la plus déroutante possible.
      */
     @Test
-    fun `le pouce baisse n a pas de modele geometrique`() {
-        assertTrue(GestureType.THUMB_DOWN !in PoseScorer().poses)
+    fun `les deux voies de reconnaissance couvrent le meme vocabulaire`() {
+        val canned = CannedGesture.recognizedLabels
+            .mapNotNull { CannedGesture.from(it, confident) }
+            .toSet()
+        assertEquals(PoseScorer().poses.toSet(), canned)
     }
 }

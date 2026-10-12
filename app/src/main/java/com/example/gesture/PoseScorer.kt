@@ -39,7 +39,24 @@ class PoseScorer(private val config: Config = Config()) {
          * rejet, sur une main pourtant parfaite. Sur une main réelle, cette paire oscillait donc
          * en permanence. Relevé à 1, il porte cette marge à 0,200.
          */
-        val thumbWeight: Float = 1.0f
+        val thumbWeight: Float = 1.0f,
+
+        /**
+         * Part du **doigt le plus mal placé** dans le score, le reste venant de l'erreur moyenne.
+         *
+         * Ce terme a été ajouté après une mesure qui contredisait l'intuition. Réduire le
+         * vocabulaire à trois modèles **affaiblissait** le rejet au lieu de le renforcer : la marge
+         * ne départage que les modèles entre eux, et moins il y a de rivaux, plus la meilleure
+         * hypothèse gagne confortablement, même quand elle ne ressemble à rien. Deux doigts tendus
+         * étaient ainsi classés « index pointé » avec une marge de 0,150 et un score de 0,750, parce
+         * que l'erreur moyennée sur cinq doigts diluait un doigt totalement faux en un écart de 0,2.
+         *
+         * Compter le pire doigt empêche cette dilution : une main dont un seul doigt contredit
+         * franchement le modèle n'est plus « assez proche », quelle que soit la justesse des autres.
+         * C'est ce qui rend vraie la propriété dont dépend toute la refonte — les décomptes
+         * intermédiaires ne correspondent à aucune pose, donc les traverser ne déclenche rien.
+         */
+        val worstFingerWeight: Float = 0.5f
     )
 
     /**
@@ -56,28 +73,32 @@ class PoseScorer(private val config: Config = Config()) {
     )
 
     /**
-     * Les modèles sont choisis pour qu'aucune paire ne diffère par moins d'un doigt long entier —
-     * à la seule exception de poing / pouce levé, que le pouce sépare explicitement.
+     * Trois modèles, choisis pour être **maximalement éloignés** : zéro doigt, un doigt, cinq
+     * doigts. La propriété qui compte n'est pas leur nombre mais la nature de ce qui les sépare —
+     * chaque paire diffère par au moins un **doigt long** passant de replié à franchement tendu,
+     * jamais par le seul pouce ni par une extension partielle.
      *
-     * C'est la raison pour laquelle certaines poses pourtant faciles à faire ont été **écartées** :
+     * Les poses écartées l'ont été pour des raisons mesurées, pas par goût de la sobriété :
      *
-     *  - *quatre doigts* (pouce replié) ne se distingue de la main ouverte que par le pouce, le
-     *    plus mal suivi des cinq doigts, et par une distinction — pouce rentré ou sorti — que
-     *    personne ne fait de façon reproductible ;
-     *  - le *pistolet* (index tendu + pouce sorti) obligerait à imposer un pouce replié au
-     *    pointage, alors que c'est précisément le doigt qui bouge pour cliquer.
+     *  - le *pouce levé* ne diffère du poing que par le pouce, le plus mal suivi des cinq doigts,
+     *    et il était la rivale la plus proche à la fois du poing **et** de l'index pointé — trois
+     *    poses se disputaient donc le même voisinage, toutes à 0,200 du seuil de rejet ;
+     *  - le *pouce baissé* ajoutait une troisième lecture de cette même forme de main ;
+     *  - le *« V »* ne diffère de l'index pointé que par le majeur, replié donc occulté dans le
+     *    pointage ;
+     *  - *trois doigts* demandait de replier l'annulaire indépendamment, ce que le couplage des
+     *    tendons fléchisseurs interdit à la plupart des mains ;
+     *  - *quatre doigts*, l'*auriculaire seul* et les *cornes* reposaient sur un contrôle isolé
+     *    des doigts les plus petits et les plus mal suivis.
      *
-     * Ajouter ces deux poses aurait porté le vocabulaire à onze signes en rendant instables les
-     * deux plus utilisés. Neuf signes fiables valent mieux que onze dont deux se disputent.
+     * Conséquence la plus importante : les décomptes intermédiaires — deux, trois, quatre doigts —
+     * ne correspondent plus à aucun modèle. Les traverser en changeant de forme ne peut donc plus
+     * verrouiller quoi que ce soit, là où chaque pose supplémentaire créait autant de pièges.
      */
     private val templates = listOf(
         Template(GestureType.POINT, 1f, 0f, 0f, 0f, null),
-        Template(GestureType.TWO_FINGER, 1f, 1f, 0f, 0f, null),
         Template(GestureType.OPEN_PALM, 1f, 1f, 1f, 1f, 1f),
-        // Poing et pouce levé ne diffèrent que par le pouce : c'est donc lui qui doit trancher,
-        // et le modèle l'exige explicitement dans les deux cas.
-        Template(GestureType.FIST, 0f, 0f, 0f, 0f, 0f),
-        Template(GestureType.THUMB_UP, 0f, 0f, 0f, 0f, 1f)
+        Template(GestureType.FIST, 0f, 0f, 0f, 0f, 0f)
     )
 
     /** Modèles exposés pour les tests de discriminabilité et l'aide à l'écran. */
@@ -118,20 +139,34 @@ class PoseScorer(private val config: Config = Config()) {
         return best - second
     }
 
+    /**
+     * Score d'une pose : combinaison de l'erreur moyenne et de celle du doigt le plus mal placé.
+     *
+     * Les deux termes ne mesurent pas la même chose, et c'est pourquoi il en faut deux. L'erreur
+     * moyenne dit si la main ressemble globalement au modèle ; l'erreur maximale dit si **un** doigt
+     * le contredit. Avec la moyenne seule, un doigt totalement faux ne coûtait qu'un cinquième du
+     * score, de sorte qu'une main à deux doigts passait pour un index pointé.
+     */
     private fun score(template: Template, m: HandMetrics): Float {
         var error = 0f
         var weight = 0f
+        var worst = 0f
 
-        error += abs(m.fingerExtension[0] - template.index); weight += 1f
-        error += abs(m.fingerExtension[1] - template.middle); weight += 1f
-        error += abs(m.fingerExtension[2] - template.ring); weight += 1f
-        error += abs(m.fingerExtension[3] - template.pinky); weight += 1f
-
-        template.thumb?.let {
-            error += abs(m.thumbExtension - it) * config.thumbWeight
-            weight += config.thumbWeight
+        fun add(observed: Float, expected: Float, fingerWeight: Float) {
+            val e = abs(observed - expected)
+            error += e * fingerWeight
+            weight += fingerWeight
+            if (e > worst) worst = e
         }
 
-        return (1f - error / weight).coerceIn(0f, 1f)
+        add(m.fingerExtension[0], template.index, 1f)
+        add(m.fingerExtension[1], template.middle, 1f)
+        add(m.fingerExtension[2], template.ring, 1f)
+        add(m.fingerExtension[3], template.pinky, 1f)
+        template.thumb?.let { add(m.thumbExtension, it, config.thumbWeight) }
+
+        val mean = error / weight
+        val combined = (1f - config.worstFingerWeight) * mean + config.worstFingerWeight * worst
+        return (1f - combined).coerceIn(0f, 1f)
     }
 }

@@ -108,7 +108,8 @@ class MainActivity : ComponentActivity() {
                         clickTuning = clickTuning,
                         onToggleEngine = ::toggleEngine,
                         onClickTuningChange = ::applyClickTuning,
-                        onRebind = ::rebind
+                        onRebind = ::rebind,
+                        onRebindSector = ::rebindSector
                     )
                 }
             }
@@ -217,6 +218,13 @@ class MainActivity : ComponentActivity() {
      */
     private fun rebind(gesture: GestureType, action: BindableAction) {
         bindings = bindings.with(gesture, action)
+        bindingsStore.save(bindings)
+        if (StarkVisionService.isRunning) StarkVisionService.start(this)
+    }
+
+    /** Même chose pour une direction de la roue de commandes. */
+    private fun rebindSector(sector: Int, action: BindableAction) {
+        bindings = bindings.withSector(sector, action)
         bindingsStore.save(bindings)
         if (StarkVisionService.isRunning) StarkVisionService.start(this)
     }
