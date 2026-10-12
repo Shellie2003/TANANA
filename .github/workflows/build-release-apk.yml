@@ -39,8 +39,16 @@ jobs:
 
       # Fournit le SDK Android et accepte les licences, sans quoi AGP ne peut pas
       # télécharger la plateforme compileSdk 36.1.
+      #
+      # `packages: tools platform-tools` est la valeur par défaut de l'action, et elle est
+      # désormais cassée : Google a retiré le paquet `tools` de son dépôt, si bien que sdkmanager
+      # échoue sur « Failed to find package 'tools' » avant même que le build ne commence. Le
+      # paquet était de toute façon obsolète et inutile ici — AGP télécharge lui-même la
+      # plateforme et les build-tools dont il a besoin. On ne demande donc que platform-tools.
       - name: Installer le SDK Android
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # Met en cache les dépendances et la distribution Gradle entre deux exécutions.
       - name: Préparer Gradle
