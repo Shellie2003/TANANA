@@ -11,6 +11,7 @@ import android.view.KeyEvent
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.control.StrokeKinematics
 import com.example.control.SystemAction
 import com.example.control.TargetSnapper
 import kotlin.math.abs
@@ -69,11 +70,22 @@ class StarkAccessibilityService : AccessibilityService() {
             // Le doigt se pose, suit la main, puis se lève. Si la diffusion continue est
             // indisponible — Android 7, ou refus du système — `streaming` reste faux et le
             // glisser complet émis au relâchement prend le relais.
-            is SystemAction.DragStart -> strokeBegin(action.x * width, action.y * height)
-            is SystemAction.DragMove -> strokeMoveTo(action.x * width, action.y * height)
+            is SystemAction.DragStart -> {
+                pendingRecenter = null
+                val area = findScrollableArea(action.x, action.y, width, height)
+                val start = kinematics.begin(action.x, action.y, area)
+                strokeBegin(start.x * width, start.y * height)
+            }
 
-            is SystemAction.Drag ->
+            is SystemAction.DragMove -> advanceStroke(action.x, action.y, width, height)
+
+            is SystemAction.Drag -> {
+                pendingRecenter = null
                 if (streaming) {
+                    // Dégagement éventuel avant la levée : un tracé qui n'a presque pas bougé
+                    // depuis sa pose serait lu comme un appui, et ouvrirait l'élément sous le
+                    // doigt au lieu de défiler.
+                    kinematics.endAdjustment()?.let { strokeMoveTo(it.x * width, it.y * height) }
                     strokeEnd()
                 } else {
                     drag(
@@ -81,6 +93,8 @@ class StarkAccessibilityService : AccessibilityService() {
                         action.toX * width, action.toY * height
                     )
                 }
+                kinematics.reset()
+            }
 
             SystemAction.Back -> global(GLOBAL_ACTION_BACK)
             SystemAction.Home -> global(GLOBAL_ACTION_HOME)
@@ -309,6 +323,18 @@ class StarkAccessibilityService : AccessibilityService() {
      * Si la diffusion est indisponible ou refusée, [streaming] reste faux et l'appelant retombe
      * sur le glisser synthétisé au relâchement, qui reste correct pour déplacer un élément.
      */
+    private val kinematics = StrokeKinematics()
+
+    /**
+     * Repositionnement en attente, en coordonnées écran normalisées.
+     *
+     * Il est **étalé sur deux images**, et ce n'est pas un détail d'implémentation : enchaîner
+     * `strokeEnd()` et `strokeBegin()` dans la même image ferait appeler `abandonStroke()` avant
+     * que la levée n'ait été envoyée, et le doigt resterait posé sur l'écran — précisément le pire
+     * défaut possible ici. On attend donc que [streaming] retombe, preuve que la levée est partie.
+     */
+    private var pendingRecenter: Pair<Float, Float>? = null
+
     private var activeStroke: GestureDescription.StrokeDescription? = null
     private var strokeX = 0f
     private var strokeY = 0f
@@ -325,6 +351,125 @@ class StarkAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Trait continu sans rappel de fin : levée forcée")
             abandonStroke()
         }
+    }
+
+    /**
+     * Avance le doigt d'une image, en déléguant la cinématique à [StrokeKinematics].
+     *
+     * Sur une zone défilable, le doigt est amplifié et confiné : quand il atteint le bord, il est
+     * relevé puis reposé de l'autre côté. C'est ce qui lui évite de se figer — et donc ce qui rend
+     * son élan à Android au relâchement. Partout ailleurs, le rapport reste 1:1.
+     */
+    private fun advanceStroke(xNorm: Float, yNorm: Float, width: Float, height: Float) {
+        pendingRecenter?.let { (rx, ry) ->
+            // La levée précédente n'est pas encore partie : on laisse passer cette image.
+            if (streaming) return
+            pendingRecenter = null
+            strokeBegin(rx * width, ry * height)
+        }
+
+        val advance = kinematics.move(xNorm, yNorm)
+        if (advance.recenter) {
+            if (!streaming) return
+            strokeEnd()
+            pendingRecenter = advance.x to advance.y
+            return
+        }
+        strokeMoveTo(advance.x * width, advance.y * height)
+    }
+
+    /**
+     * Zone défilable sous un point, ou null s'il n'y en a aucune d'exploitable.
+     *
+     * C'est **le système qui répond**, et non un geste de l'utilisateur : on lui demande ce qui se
+     * trouve sous le doigt. Quand il ne déclare rien — l'application n'expose pas ses zones
+     * défilables — on retombe sur le rapport 1:1, c'est-à-dire sur le comportement précédent.
+     * Jamais pire, donc, et aucun mode à apprendre.
+     *
+     * Les axes viennent des actions que le nœud déclare. À défaut, ils sont déduits de sa forme :
+     * laisser passer les deux axes serait risqué, puisqu'un déplacement horizontal sur une liste
+     * verticale y écarte souvent l'élément sous le doigt.
+     */
+    private fun findScrollableArea(
+        xNorm: Float,
+        yNorm: Float,
+        width: Float,
+        height: Float
+    ): StrokeKinematics.Area? {
+        if (width <= 0f || height <= 0f) return null
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return null
+
+        val x = xNorm * width
+        val y = yNorm * height
+        val bounds = android.graphics.Rect()
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.addLast(root to 0)
+        var visited = 0
+        var best: StrokeKinematics.Area? = null
+
+        // Parcours en largeur : la profondeur croît, donc la dernière correspondance trouvée est
+        // la plus imbriquée — une liste dans une page, et non la page entière.
+        while (queue.isNotEmpty() && visited < MAX_NODES) {
+            val (node, depth) = queue.removeFirst()
+            visited++
+
+            if (node.isScrollable && node.isVisibleToUser) {
+                node.getBoundsInScreen(bounds)
+                if (x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom) {
+                    val w = (bounds.right - bounds.left).toFloat()
+                    val h = (bounds.bottom - bounds.top).toFloat()
+                    // Une zone minuscule ne laisserait pas de course utile : le doigt y serait
+                    // repositionné à chaque image, ce qui hacherait le défilement.
+                    if (w >= width * MIN_SCROLL_AREA && h >= height * MIN_SCROLL_AREA) {
+                        best = StrokeKinematics.Area(
+                            left = bounds.left / width,
+                            top = bounds.top / height,
+                            right = bounds.right / width,
+                            bottom = bounds.bottom / height,
+                            horizontal = scrollsHorizontally(node, w, h),
+                            vertical = scrollsVertically(node, w, h)
+                        )
+                    }
+                }
+            }
+
+            if (depth < MAX_DEPTH) {
+                for (i in 0 until node.childCount) {
+                    val child = runCatching { node.getChild(i) }.getOrNull() ?: continue
+                    queue.addLast(child to depth + 1)
+                }
+            }
+        }
+
+        return best?.takeIf { it.horizontal || it.vertical }
+    }
+
+    private fun scrollsVertically(node: AccessibilityNodeInfo, w: Float, h: Float): Boolean {
+        val actions = runCatching { node.actionList }.getOrNull().orEmpty()
+        val up = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP
+        val down = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN
+        if (up in actions || down in actions) return true
+        if (hasDirectionalScroll(actions)) return false
+        // Aucun axe déclaré : déduit de la forme, le cas le plus fréquent étant une liste haute.
+        return h >= w
+    }
+
+    private fun scrollsHorizontally(node: AccessibilityNodeInfo, w: Float, h: Float): Boolean {
+        val actions = runCatching { node.actionList }.getOrNull().orEmpty()
+        val left = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT
+        val right = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT
+        if (left in actions || right in actions) return true
+        if (hasDirectionalScroll(actions)) return false
+        return w > h
+    }
+
+    private fun hasDirectionalScroll(
+        actions: List<AccessibilityNodeInfo.AccessibilityAction>
+    ): Boolean = actions.any {
+        it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP ||
+            it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN ||
+            it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT ||
+            it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT
     }
 
     private fun strokeBegin(x: Float, y: Float) {
@@ -368,6 +513,7 @@ class StarkAccessibilityService : AccessibilityService() {
 
     /** Abandonne le trait sans chercher à le clore proprement : dernier recours. */
     private fun abandonStroke() {
+        pendingRecenter = null
         mainHandler.removeCallbacks(strokeWatchdog)
         streaming = false
         endRequested = false
@@ -493,6 +639,13 @@ class StarkAccessibilityService : AccessibilityService() {
         private const val MAX_NODES = 400
         private const val MAX_DEPTH = 24
         private const val MAX_TARGETS = 120
+
+        /**
+         * Taille minimale d'une zone défilable, en fraction d'écran, pour mériter l'amplification.
+         * En deçà, la course disponible est si courte que le doigt y serait repositionné sans
+         * cesse, et le défilement en serait haché.
+         */
+        private const val MIN_SCROLL_AREA = 0.25f
 
         @Volatile
         var instance: StarkAccessibilityService? = null

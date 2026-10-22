@@ -107,6 +107,43 @@ défilement, en balayage, en glisser-déposer — exactement comme il le fait d'
 vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
 Android sait déjà quoi faire d'un doigt.
 
+#### Le défilement : pourquoi le doigt est décollé du curseur
+
+Le doigt synthétique a d'abord suivi la **position absolue** du curseur. Trois symptômes en
+découlaient, et ils n'en faisaient qu'un :
+
+- **Capacité** — ce qu'on pouvait défiler d'un pincement était borné par la distance entre le point
+  de départ et le bord de l'écran. Pincer au milieu donnait une demi-page, d'où des
+  pincer-tirer-relâcher à répétition.
+- **Élan** — une fois le curseur buté sur le bord, le déplacement devenait nul et plus aucun segment
+  n'était émis. Android mesurait donc une vitesse nulle au relâchement : **aucune inertie**.
+- **Effort** — le rapport était de 1:1 : défiler une page demandait de déplacer la main d'une page.
+
+Le doigt est désormais **décollé** du curseur ([`StrokeKinematics`]). Il avance par incréments
+amplifiés — 1:1 sur les 9 premiers pour cent de déplacement, puis un gain progressif jusqu'à 3,4 —
+dans une zone bornée dont il ne sort jamais : au bord, il est relevé et reposé de l'autre côté pour
+continuer dans le même sens.
+
+La conséquence la plus importante n'est pas la capacité, c'est l'**élan**. Comme le doigt ne se fige
+plus jamais, le dernier segment porte toujours une vraie vitesse, et Android lance l'inertie comme
+pour un doigt sur la vitre. La capacité vient donc du mouvement, pas de la course du bras : un
+balayage franc fait défiler plusieurs pages, puis le contenu continue seul.
+
+Le doigt part du **centre de la zone défilable**, et non du point pincé : c'est ce qui donne la même
+course dans les quatre directions, là où pincer en bas de l'écran ne laissait presque rien pour
+défiler vers le bas.
+
+L'amplification ne s'applique **pas à tout** — amplifier un glisser d'icône ou le curseur d'un
+réglage le rendrait faux. Le mode est choisi par ce qui se trouve sous le doigt, demandé au système
+lui-même : sur une zone défilable, amplification et repositionnement ; partout ailleurs, 1:1 strict.
+Quand l'application ne déclare pas ses zones défilables, on retombe sur le 1:1, donc sur le
+comportement précédent : jamais pire. Les axes viennent des actions que le nœud déclare, de sorte
+qu'un déplacement horizontal sur une liste verticale n'y écarte pas l'élément sous le doigt.
+
+Un repositionnement suivi d'un relâchement immédiat serait un contact posé et relevé presque au
+même endroit — **un appui**, qui ouvrirait l'élément sous le doigt au lieu de défiler. Un
+dégagement minimal est donc garanti avant toute levée.
+
 L'arbitrage entre les trois issues se fait sur un **déplacement** (2,2 % de l'écran) et une
 **durée** (550 ms), jamais sur une vitesse. C'est le point sur lequel une tentative précédente a
 échoué : un défilement distingué par sa vitesse partait tout seul, parce qu'une traversée d'écran
@@ -196,7 +233,7 @@ réellement économisée est affichée dans l'application.
 ## Tests
 
 Les composants de précision, la politique de commande et la régulation de cadence sont couverts
-par 134 tests JVM (exécution en quelques dizaines de
+par 149 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash
@@ -206,6 +243,7 @@ millisecondes, sans appareil) :
 `SyntheticHand` génère des poses de main paramétrables (courbure de chaque doigt, écart du
 pincement, échelle, position), ce qui rend les scénarios gestuels parfaitement reproductibles :
 absence de rebond au seuil, unicité de l'appui, arbitrage entre appui, appui long et tracé,
+cinématique du défilement — course symétrique, doigt jamais figé, jamais confondu avec un appui —
 invariance d'échelle, bruit et latence du filtre.
 
 ## Intégration continue
