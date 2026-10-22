@@ -3,25 +3,24 @@ package com.example.control
 /**
  * Action système décidée à partir d'un geste.
  *
- * Séparer la décision de son exécution rend toute la politique de commande testable en JVM :
- * on vérifie qu'un geste produit la bonne action sans avoir besoin d'un appareil, d'un service
- * d'accessibilité ni d'une caméra.
+ * Séparer la décision de son exécution rend toute la décision testable en JVM : on vérifie qu'un
+ * geste produit la bonne action sans appareil, sans caméra et sans service d'accessibilité.
+ *
+ * La liste a perdu le déplacement de curseur, le double appui et les deux défilements. Aucun
+ * n'était encore émis : le curseur se dessine sans passer par une action, et **le défilement n'est
+ * plus une action du tout** — c'est un tracé continu que le système interprète lui-même, comme il
+ * le fait d'un doigt sur la vitre. Les laisser dans cette liste laissait croire à des capacités
+ * qui n'existaient plus.
  */
 sealed interface SystemAction {
 
     // --- Pointage ---------------------------------------------------------------------------
-
-    /** Déplacement du curseur, en coordonnées écran normalisées 0..1. */
-    data class MoveCursor(val x: Float, val y: Float) : SystemAction
 
     /** Appui bref. */
     data class Tap(val x: Float, val y: Float) : SystemAction
 
     /** Appui long : ouvre les menus contextuels, sélectionne du texte. */
     data class LongPress(val x: Float, val y: Float) : SystemAction
-
-    /** Double appui : zoom dans les cartes et les images. */
-    data class DoubleTap(val x: Float, val y: Float) : SystemAction
 
     /** Début d'un glisser : signalé à la superposition, pas au système. */
     data class DragStart(val x: Float, val y: Float) : SystemAction
@@ -39,17 +38,6 @@ sealed interface SystemAction {
         val toX: Float,
         val toY: Float
     ) : SystemAction
-
-    // --- Défilement -------------------------------------------------------------------------
-
-    /**
-     * Défilement vertical. [amount] est une fraction de hauteur d'écran ;
-     * positif = le contenu descend.
-     */
-    data class Scroll(val amount: Float) : SystemAction
-
-    /** Défilement horizontal, pour les carrousels et les onglets. */
-    data class ScrollHorizontal(val amount: Float) : SystemAction
 
     // --- Navigation -------------------------------------------------------------------------
 

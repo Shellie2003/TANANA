@@ -5,50 +5,68 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Le fichier a maigri avec la refonte, et c'est le point : il ne reste à vérifier que deux
+ * mesures, la position et l'écart pouce-index. Les tests d'extension de doigts ont disparu parce
+ * que la mesure a disparu — la forme de la main n'est plus lue.
+ */
 class HandGeometryTest {
 
+    // --- L'écart pouce-index, le seul bouton -------------------------------------------------
+
+    /**
+     * Propriété essentielle : le seuil du pincement doit rester valable quelle que soit la
+     * distance de la main à la caméra. Une main deux fois plus petite dans l'image doit produire
+     * exactement le même ratio normalisé — sans quoi le geste cesserait de marcher dès qu'on
+     * éloigne le bras, ce qui est précisément ce qu'un seuil absolu produisait.
+     */
     @Test
-    fun `main ouverte - quatre doigts detectes comme tendus`() {
-        val m = SyntheticHand.metrics(SyntheticHand.openPalm())
-        assertEquals(4, m.extendedFingerCount)
-        assertTrue("pouce attendu tendu, obtenu ${m.thumbExtension}", m.thumbExtension > 0.5f)
+    fun `le pincement est invariant a l echelle de la main`() {
+        val far = SyntheticHand.metrics(SyntheticHand.build(scale = 0.09f, pinchDistance = 0.25f))
+        val near = SyntheticHand.metrics(SyntheticHand.build(scale = 0.22f, pinchDistance = 0.25f))
+        assertEquals(near.pinchRatio, far.pinchRatio, 0.05f)
     }
 
     @Test
-    fun `poing - aucun doigt tendu et pouce rabattu`() {
-        val m = SyntheticHand.metrics(SyntheticHand.fist())
-        assertEquals(0, m.extendedFingerCount)
-        assertTrue("pouce attendu replié, obtenu ${m.thumbExtension}", m.thumbExtension < 0.5f)
-    }
-
-    @Test
-    fun `pointage - index tendu et autres doigts replies`() {
-        val m = SyntheticHand.metrics(SyntheticHand.pointing())
-        assertTrue(m.fingerExtension[0] > 0.7f)
-        assertTrue(m.fingerExtension[1] < 0.4f)
-        assertTrue(m.fingerExtension[2] < 0.4f)
-        assertTrue(m.fingerExtension[3] < 0.4f)
+    fun `le pincement distingue la main fermee de la main ouverte`() {
+        val ouvert = SyntheticHand.metrics(SyntheticHand.build(pinchDistance = 0.9f))
+        val ferme = SyntheticHand.metrics(SyntheticHand.build(pinchDistance = 0.08f))
+        assertTrue("ouvert=${ouvert.pinchRatio} fermé=${ferme.pinchRatio}", ouvert.pinchRatio > ferme.pinchRatio * 3f)
     }
 
     /**
-     * Propriété essentielle : les seuils gestuels doivent rester valables quelle que soit la
-     * distance de la main à la caméra. Une main deux fois plus petite dans l'image doit produire
-     * exactement les mêmes ratios normalisés.
+     * Le pincement ne doit pas dépendre de la forme du reste de la main : c'est ce qui permet de
+     * garder la main détendue, dans la position qu'on veut, au lieu de tenir une pose.
      */
     @Test
-    fun `ratios invariants a l echelle de la main`() {
-        val far = SyntheticHand.metrics(SyntheticHand.build(scale = 0.09f, pinchDistance = 0.25f))
-        val near = SyntheticHand.metrics(SyntheticHand.build(scale = 0.22f, pinchDistance = 0.25f))
+    fun `le pincement ne depend pas de la forme du reste de la main`() {
+        val mesures = listOf(
+            floatArrayOf(1f, 1f, 1f, 1f),
+            floatArrayOf(1f, 0f, 0f, 0f),
+            floatArrayOf(1f, 1f, 0f, 0f),
+            floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f)
+        ).map {
+            SyntheticHand.metrics(SyntheticHand.build(extension = it, pinchDistance = 0.1f)).pinchRatio
+        }
 
-        assertEquals(near.pinchRatio, far.pinchRatio, 0.05f)
-        assertEquals(near.fingerExtension[0], far.fingerExtension[0], 0.05f)
+        val ecart = mesures.max() - mesures.min()
+        assertTrue("le pincement varie de $ecart selon la forme de la main : $mesures", ecart < 0.12f)
     }
+
+    // --- Position et plausibilité ------------------------------------------------------------
 
     @Test
     fun `profondeur croit quand la main s eloigne`() {
         val far = SyntheticHand.metrics(SyntheticHand.build(scale = 0.09f))
         val near = SyntheticHand.metrics(SyntheticHand.build(scale = 0.22f))
         assertTrue("far=${far.depth} near=${near.depth}", far.depth > near.depth)
+    }
+
+    @Test
+    fun `l ancre du curseur suit la main`() {
+        val gauche = SyntheticHand.metrics(SyntheticHand.build(cx = 0.25f))
+        val droite = SyntheticHand.metrics(SyntheticHand.build(cx = 0.75f))
+        assertTrue(droite.pointerX > gauche.pointerX)
     }
 
     @Test
@@ -70,21 +88,5 @@ class HandGeometryTest {
         val outside = SyntheticHand.metrics(SyntheticHand.openPalm(cx = 1.35f))
         assertTrue(inside.quality > 0.6f)
         assertTrue("outside=${outside.quality}", outside.quality < inside.quality)
-    }
-
-    @Test
-    fun `angle articulaire - segment tendu proche de 180 degres`() {
-        val a = Landmark(0f, 0f)
-        val vertex = Landmark(0f, 1f)
-        val b = Landmark(0f, 2f)
-        assertEquals(180f, HandGeometry.jointAngleDeg(a, vertex, b), 0.01f)
-    }
-
-    @Test
-    fun `angle articulaire - angle droit`() {
-        val a = Landmark(0f, 0f)
-        val vertex = Landmark(0f, 1f)
-        val b = Landmark(1f, 1f)
-        assertEquals(90f, HandGeometry.jointAngleDeg(a, vertex, b), 0.01f)
     }
 }

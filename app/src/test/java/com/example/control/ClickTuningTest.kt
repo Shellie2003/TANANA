@@ -1,6 +1,6 @@
 package com.example.control
 
-import com.example.gesture.ClickDetector
+import com.example.gesture.PinchDetector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,30 +15,30 @@ class ClickTuningTest {
 
     private val frameMs = 33L
 
-    /** Joue une fermeture de vitesse donnée et dit si elle produit un clic. */
-    private fun clicksWith(tuning: ClickTuning, closingFrames: Int): Boolean {
-        val d = ClickDetector(tuning.toConfig())
+    /** Joue une fermeture de vitesse donnée et dit si elle enfonce le bouton. */
+    private fun pressesWith(tuning: ClickTuning, closingFrames: Int): Boolean {
+        val d = PinchDetector(tuning.toConfig())
         var t = 0L
         repeat(40) { d.update(0.85f, 0.5f, 0.5f, t); t += frameMs }
 
-        var clicked = false
+        var pressed = false
         // Descente régulière de 0,85 jusqu'au contact, en `closingFrames` images.
         for (i in 1..closingFrames) {
             val ratio = 0.85f - (0.75f * i / closingFrames)
-            if (d.update(ratio, 0.5f, 0.5f, t) == ClickDetector.Event.CLICK) clicked = true
+            if (d.update(ratio, 0.5f, 0.5f, t) == PinchDetector.Event.PRESS) pressed = true
             t += frameMs
         }
         listOf(0.50f, 0.85f, 0.85f).forEach { ratio ->
-            if (d.update(ratio, 0.5f, 0.5f, t) == ClickDetector.Event.CLICK) clicked = true
+            if (d.update(ratio, 0.5f, 0.5f, t) == PinchDetector.Event.PRESS) pressed = true
             t += frameMs
         }
-        return clicked
+        return pressed
     }
 
     @Test
     fun `un geste vif est accepte par les trois reglages`() {
         ClickTuning.entries.forEach { tuning ->
-            assertTrue("$tuning refuse un geste vif", clicksWith(tuning, closingFrames = 6))
+            assertTrue("$tuning refuse un geste vif", pressesWith(tuning, closingFrames = 6))
         }
     }
 
@@ -52,17 +52,17 @@ class ClickTuningTest {
     @Test
     fun `chaque cran supplementaire rejette les gestes plus lents`() {
         // Fermeture posée : « Vif » décroche, les deux autres passent encore.
-        assertTrue(clicksWith(ClickTuning.RELAXED, 14))
-        assertTrue(clicksWith(ClickTuning.STANDARD, 14))
-        assertTrue("« Vif » doit refuser une fermeture posée", !clicksWith(ClickTuning.BRISK, 14))
+        assertTrue(pressesWith(ClickTuning.RELAXED, 14))
+        assertTrue(pressesWith(ClickTuning.STANDARD, 14))
+        assertTrue("« Vif » doit refuser une fermeture posée", !pressesWith(ClickTuning.BRISK, 14))
 
         // Fermeture lente : seul « Souple » l'accepte.
-        assertTrue("« Souple » doit accepter une fermeture lente", clicksWith(ClickTuning.RELAXED, 18))
-        assertTrue(!clicksWith(ClickTuning.STANDARD, 18))
+        assertTrue("« Souple » doit accepter une fermeture lente", pressesWith(ClickTuning.RELAXED, 18))
+        assertTrue(!pressesWith(ClickTuning.STANDARD, 18))
 
-        // Repositionnement de la main : aucun réglage ne doit y voir un clic.
+        // Repositionnement de la main : aucun réglage ne doit y voir un appui.
         ClickTuning.entries.forEach { tuning ->
-            assertTrue("$tuning confond un repositionnement avec un clic", !clicksWith(tuning, 30))
+            assertTrue("$tuning confond un repositionnement avec un appui", !pressesWith(tuning, 30))
         }
     }
 

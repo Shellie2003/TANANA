@@ -6,8 +6,13 @@ import kotlin.math.sin
 /**
  * Générateur de mains synthétiques de 21 points, paramétrable.
  *
- * Permet de valider toute la chaîne de précision (géométrie, classification, filtrage) sur JVM,
- * sans caméra ni émulateur, avec des poses parfaitement reproductibles.
+ * Permet de valider la chaîne de précision — géométrie, pincement, filtrage — sur JVM, sans
+ * caméra ni émulateur, avec des mains parfaitement reproductibles.
+ *
+ * Les fabriques nommées d'après des poses ont disparu avec les poses elles-mêmes. Il ne reste que
+ * [build], qui produit une main quelconque : c'est exactement ce dont on a besoin maintenant,
+ * puisque la propriété à vérifier est que le pincement se mesure **indépendamment de la forme du
+ * reste de la main**.
  */
 object SyntheticHand {
 
@@ -67,28 +72,15 @@ object SyntheticHand {
         return pts.map { it!! }
     }
 
+    /**
+     * Main ouverte, pouce écarté. Elle ne porte plus de sens gestuel : ce n'est qu'une main
+     * plausible, utile pour éprouver la position et la plausibilité de la détection.
+     */
     fun openPalm(cx: Float = 0.5f, scale: Float = 0.18f) =
         build(cx = cx, scale = scale)
 
+    /** Main dont le pouce touche l'index : le bouton enfoncé. */
     fun pinching(cx: Float = 0.5f) = build(cx = cx, pinchDistance = 0.10f)
-
-    fun fist(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(0f, 0f, 0f, 0f), thumbCurled = true)
-
-    fun pointing(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(1f, 0f, 0f, 0f))
-
-    /**
-     * Index et majeur tendus. Ce n'est plus une pose du vocabulaire, et la fabrique est conservée
-     * pour cette raison : les tests doivent pouvoir vérifier qu'elle est bien **rejetée**, ce qui
-     * est la garantie que la traverser en ouvrant la main ne déclenche rien.
-     */
-    fun twoFingers(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(1f, 1f, 0f, 0f))
-
-    /** Poing dont seul le pouce ressort. Également hors vocabulaire, et testé comme tel. */
-    fun thumbUp(cx: Float = 0.5f) =
-        build(cx = cx, extension = floatArrayOf(0f, 0f, 0f, 0f), thumbCurled = false, pinchDistance = 1.6f)
 
     fun metrics(landmarks: List<Landmark>): HandMetrics =
         requireNotNull(HandGeometry.analyze(landmarks)) { "pose synthétique invalide" }

@@ -142,23 +142,29 @@ jobs:
                   method = "STORED" if info.compress_type == zipfile.ZIP_STORED else "DEFLATED"
                   print(f"  {info.filename}  {info.file_size} octets  {method}")
 
-          # Le paquet du reconnaisseur contient le modèle de points de repère *et* le classifieur
-          # de poses. Vérifier qu'il est là et qu'il porte bien les deux : un paquet tronqué se
-          # chargerait sans erreur, et le classifieur s'abstiendrait silencieusement — la pose
-          # serait alors toujours décidée par le repli géométrique, sans que rien ne le signale.
-          if not any("gesture_recognizer.task" in n for n in names):
-              print("::error::assets/gesture_recognizer.task absent de l'APK.")
+          # Le paquet de points de repère doit être là et porter ses deux modèles internes. Un
+          # paquet tronqué se chargerait sans lever d'erreur, et la main ne serait simplement
+          # jamais détectée — un défaut qui n'apparaîtrait qu'à l'usage, sur l'appareil.
+          #
+          # Le classifieur de poses a disparu avec le vocabulaire de poses : `gesture_recognizer`
+          # est redevenu `hand_landmarker`, soit 554 Ko et une inférence par image en moins.
+          if not any("hand_landmarker.task" in n for n in names):
+              print("::error::assets/hand_landmarker.task absent de l'APK.")
+              sys.exit(1)
+          if any("gesture_recognizer.task" in n for n in names):
+              print("::error::gesture_recognizer.task est encore empaqueté : le classifieur de "
+                    "poses a été retiré, son modèle ne doit plus peser dans l'APK.")
               sys.exit(1)
 
           bundle = io.BytesIO(apk.read(
-              next(n for n in names if n.endswith("gesture_recognizer.task"))))
+              next(n for n in names if n.endswith("hand_landmarker.task"))))
           inner = zipfile.ZipFile(bundle).namelist()
           print("## Contenu du paquet de vision")
           for name in inner:
               print(f"  {name}")
-          for required in ("hand_landmarker.task", "hand_gesture_recognizer.task"):
+          for required in ("hand_detector.tflite", "hand_landmarks_detector.tflite"):
               if required not in inner:
-                  print(f"::error::{required} absent du paquet gesture_recognizer.task.")
+                  print(f"::error::{required} absent du paquet hand_landmarker.task.")
                   sys.exit(1)
 
           print("## Bibliothèques natives")

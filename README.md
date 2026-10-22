@@ -17,10 +17,10 @@ CameraX (RGBA_8888, 640x480, KEEP_ONLY_LATEST)
 HandGestureAnalyzer ......... redressement/miroir de la frame, inférence MediaPipe
     │                          (GPU avec repli CPU à chaud), horodatage monotone
     ▼
-HandGeometry ................ 21 points -> mesures normalisées, invariantes à l'échelle
-    │                          (pur Kotlin)
-    ├──▶ GestureClassifier ... machine à états : trois poses, score avec marge de rejet,
-    │                          confirmation temporelle, filtre de qualité (pur Kotlin)
+HandGeometry ................ 21 points -> deux mesures : position et écart pouce-index,
+    │                          invariantes à l'échelle (pur Kotlin)
+    ├──▶ PinchDetector ....... le bouton unique : ligne de base adaptative, hystérésis,
+    │                          anti-rebond, causes de rejet nommées (pur Kotlin)
     └──▶ CursorMapper ........ zone active, correction de gain (pur Kotlin)
               │
               ▼
@@ -55,56 +55,101 @@ Calibration du filtre, mesurée par balayage paramétrique (30 img/s, coordonné
 
 ## Gestes
 
-**Trois poses, et une roue.** Le vocabulaire a compté jusqu'à huit poses, puis six, et restait
-instable. Réduire le nombre ne suffisait pas : le défaut n'était pas la quantité mais le principe
-— distinguer des poses par le nombre de doigts tendus.
+**Il n'y en a qu'un : pincer.** Le pouce touche l'index, et c'est tout le vocabulaire.
 
-Deux faits condamnent ce principe. Le mode d'échec dominant du suivi monoculaire est l'occlusion
-des doigts par la paume, or les doigts repliés — qui portent toute l'information d'un décompte —
-sont précisément ceux qu'on ne voit pas. Et la main est un continuum : passer d'une pose à une
-autre traverse mécaniquement tous les décomptes intermédiaires, si bien que chaque pose ajoutée
-crée autant d'occasions d'en verrouiller une autre au passage. Les mesures le confirmaient : avec
-six poses, index, poing et pouce levé se tenaient tous à 0,200 du seuil de rejet, le pouce levé
-étant la rivale la plus proche *des deux autres*.
+### Pourquoi un seul
 
-| Pose | Rôle |
+Trois vocabulaires de poses ont été essayés — huit signes, puis six, puis trois, chaque fois mieux
+mesurés et mieux départagés — et les trois se sont confondus à l'usage. Le défaut n'était donc ni
+le nombre de poses ni la qualité du classement : c'était de **reconnaître une forme de main**.
+
+Cette tâche est une classification sur un continuum, et elle hérite de trois défauts qu'aucun
+réglage ne corrige :
+
+- les doigts repliés, qui portent toute l'information d'une forme, sont ceux que la caméra ne voit
+  pas — occulter le pouce fait chuter le rappel de MediaPipe d'environ 20 % ;
+- passer d'une forme à une autre traverse mécaniquement toutes les formes intermédiaires ;
+- tenir une forme en l'air fatigue la main, donc dégrade le geste à mesure qu'on s'en sert. La
+  littérature sur l'interaction aérienne est explicite : une posture statique maintenue est ce qui
+  mène le plus vite au « bras de gorille ».
+
+Les trois plateformes qui ont le plus investi sur le sujet ont convergé sur la même réponse, avec
+des capteurs bien meilleurs qu'une caméra frontale de téléphone : **Vision Pro, HoloLens et Quest
+n'ont pas de vocabulaire de poses.** Elles ont le pincement, et elles en dérivent tout le reste —
+l'appui, l'appui long, le glisser, le défilement. Si un vocabulaire de poses était tenable, elles
+l'auraient.
+
+Le pincement, lui, se mesure comme une **distance entre deux points** — bout du pouce, bout de
+l'index — les mieux vus quand la main fait face à la caméra. C'est une grandeur continue avec
+hystérésis, pas un classement à huit issues ; il se sent au doigt, donc se confirme sans regarder
+l'écran ; il s'arrête sur une butée anatomique, pas sur un seuil arbitraire ; et **il ne demande de
+tenir aucune forme** : le reste de la main fait ce qu'il veut, détendu, bras baissé.
+
+Son défaut connu disparaît du même coup. La littérature note qu'un pincement est indistinguable des
+autres gestes rapprochant le pouce de l'index — un signe « OK » déclenche un pincement. C'est vrai,
+et sans conséquence ici : ce défaut n'existe que s'il y a autre chose à confondre avec.
+
+### Tout le vocabulaire
+
+| Ce qu'on fait | Ce que ça donne |
 |---|---|
-| **Index seul** (1 doigt) | Déplace le curseur. Pouce contre index : clic. Contact maintenu : le doigt se pose et suit la main — défilement, glisser, balayage |
-| **Poing** (0 doigt) | Retour. Pose à tenir : l'anneau du curseur se remplit, changer de pose annule |
-| **Main ouverte** (5 doigts) | Ouvre la roue de commandes |
+| déplacer la main | le curseur suit, quelle que soit la forme de la main |
+| pincer et relâcher sans bouger | **appui** — le clic |
+| pincer et rester immobile | **appui long** — menus contextuels, sélection de texte |
+| pincer et déplacer la main | **tracé continu** — défilement, balayage, glisser-déposer |
+| amener le curseur au bord droit | **panneau de commandes** |
 
-Les trois formes sont maximalement éloignées, et ce qui compte n'est pas leur nombre mais la
-nature de ce qui les sépare : chaque paire diffère par au moins un **doigt long** passant de
-replié à franchement tendu — jamais par le seul pouce, le plus mal suivi des cinq, ni par une
-extension partielle, du même ordre que le bruit de suivi. Les décomptes intermédiaires — deux,
-trois doigts — ne correspondent plus à aucune pose, donc les traverser ne déclenche rien.
+C'est exactement une souris à un bouton, et c'est voulu : personne n'a à apprendre une souris.
 
-### La roue de commandes
+Le tracé porte à lui seul ce que six poses portaient avant, et mérite une remarque : rien n'est
+reconnu. On ouvre un tracé, il suit la main, et **c'est le système qui l'interprète** — en
+défilement, en balayage, en glisser-déposer — exactement comme il le fait d'un doigt posé sur la
+vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
+Android sait déjà quoi faire d'un doigt.
 
-Toutes les autres commandes passent par une roue de huit directions, ouverte par la main ouverte
-et validée par le même clic que partout ailleurs. La tolérance d'une direction est **angulaire** :
-elle ne dépend ni de la taille de l'écran, ni de la distance de la main, ni de sa stabilité.
+L'arbitrage entre les trois issues se fait sur un **déplacement** (2,2 % de l'écran) et une
+**durée** (550 ms), jamais sur une vitesse. C'est le point sur lequel une tentative précédente a
+échoué : un défilement distingué par sa vitesse partait tout seul, parce qu'une traversée d'écran
+rapide satisfait « assez loin et assez vite » sur n'importe lequel de ses segments. Déplacement et
+durée sont monotones et ne dépendent d'aucune dérivée du signal — ce sont les deux mêmes grandeurs
+qu'Android applique à un doigt sur l'écran.
 
-Par défaut, dans le sens horaire depuis le haut : Accueil, Applications récentes, Application
-suivante, Lecture/pause, Notifications, Réglages rapides, Application précédente, Clavier
-gestuel. Les huit sont réaffectables, comme les trois poses.
+### Le panneau de commandes
 
-Deux conséquences qui ne viennent pas du hasard. **Plus rien à mémoriser** : les commandes sont
-écrites à l'écran, là où un vocabulaire de poses exige de retenir un signe par commande. Et **le
-nombre de commandes cesse de peser sur la fiabilité** : en ajouter une n'ajoute plus une pose à
-distinguer. La roue n'est pas un mode — elle est visible tant que la pose est tenue et disparaît
-dès qu'on la quitte, donc on ne peut pas y rester coincé, et quitter la pose sans valider est la
-façon d'annuler.
+Toutes les commandes du téléphone vivent dans une liste, ouverte en amenant le curseur au bord droit
+de l'écran. On choisit une ligne, on pince. **Aucun geste nouveau** : le curseur se déplace comme
+toujours, et le pincement valide comme partout ailleurs.
+
+Trois propriétés en découlent :
+
+- **le nombre de commandes ne coûte plus rien** — elles sont écrites les unes sous les autres ; en
+  ajouter une n'ajoute ni forme à distinguer ni secteur à rétrécir ;
+- **il n'y a rien à mémoriser** — la liste se lit, là où un vocabulaire de gestes doit se retenir
+  avant de servir ;
+- **la visée est à une seule dimension** — choisir une ligne ne demande que de monter ou descendre,
+  ce qui est sans commune mesure avec viser un angle ou tenir une forme de main.
+
+Dix-huit commandes sont disponibles ; dix sont dans le panneau par défaut, « Retour » en premier
+puisque c'est de loin l'action la plus utilisée d'Android. La liste est librement composable.
+
+Le panneau suit la position de la main : il s'ouvre quand on reste au bord, se referme dès qu'on
+s'en éloigne. Pas de bascule, donc pas d'état où rester bloqué, et s'éloigner sans pincer n'exécute
+rien — c'est la façon d'annuler, et elle ne demande aucun geste supplémentaire. Deux garde-fous
+empêchent l'ouverture accidentelle : la bande est étroite (5 % de l'écran) et il faut y rester
+220 ms ; et le panneau ne s'ouvre **jamais pendant un pincement**, de sorte qu'un défilement longeant
+le bord droit ne peut pas le déclencher.
 
 ### Ce qui a disparu, et pourquoi
 
-- Les **balayages** demandaient un mouvement ample et rapide, indiscernable d'un déplacement de
-  main pressé. La roue fait le même travail en étant plus sûre et visible.
-- Le **pincement comme pose** entrait en conflit direct avec le clic, qui est ce même contact :
-  selon que le contact durait plus ou moins que le verrou temporel, le même geste partait en clic
-  ou en glisser. Le contact est désormais lu uniquement par le détecteur de clic.
-- Le **pouce levé**, le **pouce baissé** et le **« V »** se distinguaient de nos poses par un seul
-  doigt — le pouce, ou un doigt occulté dans le pointage.
+- **Toute la classification de poses** — `GestureClassifier`, `PoseScorer`, le classifieur entraîné
+  de MediaPipe, et avec eux `gesture_recognizer.task` au profit de `hand_landmarker.task` : 554 Ko
+  et une inférence par image en moins.
+- **Les mesures d'extension de doigts.** Elles se déduisaient de points de repère que le modèle
+  devine, puisqu'il ne les voit pas : on raisonnait sur une inférence d'une inférence.
+- **Les balayages**, qui demandaient un mouvement ample indiscernable d'un déplacement de main
+  pressé.
+- **La roue de commandes**, où la précision exigée croissait avec le nombre de commandes.
+- **Le défilement et le glisser comme actions** : le tracé continu les rend tous les deux.
 
 ## Contrôle à l'échelle du système
 
@@ -151,7 +196,7 @@ réellement économisée est affichée dans l'application.
 ## Tests
 
 Les composants de précision, la politique de commande et la régulation de cadence sont couverts
-par 162 tests JVM (exécution en quelques dizaines de
+par 134 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash
@@ -160,8 +205,8 @@ millisecondes, sans appareil) :
 
 `SyntheticHand` génère des poses de main paramétrables (courbure de chaque doigt, écart du
 pincement, échelle, position), ce qui rend les scénarios gestuels parfaitement reproductibles :
-absence de rebond au seuil, unicité du clic, rejet des poses ambiguës et des décomptes
-intermédiaires, invariance d'échelle, bruit et latence du filtre.
+absence de rebond au seuil, unicité de l'appui, arbitrage entre appui, appui long et tracé,
+invariance d'échelle, bruit et latence du filtre.
 
 ## Intégration continue
 
@@ -173,10 +218,11 @@ variante installable, publiée dans la release `unsigned-latest` :
 | `nexus-release.apk` | oui | l'artefact installable |
 
 Elle est signée avec la clé de debug (`-PstarkDebugSigning=true`) : installable pour tester,
-jamais publiable. Le workflow vérifie au passage que `gesture_recognizer.task` est bien présent
-dans les assets **et** qu'il contient ses deux modèles internes : un modèle manquant ne casse pas
-la compilation, il casse la reconnaissance à l'exécution — c'est-à-dire au seul endroit où le
-défaut ne serait plus détectable automatiquement.
+jamais publiable. Le workflow vérifie au passage que `hand_landmarker.task` est bien présent dans
+les assets **et** qu'il contient ses deux modèles internes : un modèle manquant ne casse pas la
+compilation, il casse la détection à l'exécution — c'est-à-dire au seul endroit où le défaut ne
+serait plus détectable automatiquement. Il vérifie aussi que `gesture_recognizer.task` a bien
+disparu de l'APK, pour que le modèle du classifieur retiré ne continue pas d'y peser.
 
 Le tag est glissant : il est recréé sur le commit courant à chaque build, ce qui donne une
 adresse de téléchargement permanente pour la dernière version. Les assets de release sont aussi
@@ -197,5 +243,5 @@ KEY_ALIAS=upload STORE_PASSWORD=... KEY_PASSWORD=... \
 
 - Caméra frontale (l'application reste fonctionnelle en mode tactile/simulation sans caméra)
 - Le service d'accessibilité doit être activé manuellement dans les réglages Android pour que
-  les gestes agissent hors de l'application (retour, appuis, défilement, roue de commandes)
+  les gestes agissent hors de l'application (appuis, défilement, panneau de commandes)
 - Aucune connexion réseau nécessaire : l'inférence est entièrement locale

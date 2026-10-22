@@ -9,20 +9,29 @@ import android.graphics.Rect
 import android.os.SystemClock
 import android.view.View
 import com.example.control.TargetSnapper
-import com.example.gesture.GestureType
-import com.example.input.CommandWheel
+import com.example.input.CommandPanel
 import com.example.input.RadialKeyboard
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Curseur holographique dessiné par-dessus toutes les applications.
+ * Curseur dessiné par-dessus toutes les applications, et les deux menus qui l'accompagnent.
+ *
+ * Le curseur ne porte plus qu'une information de mode, parce qu'il n'y en a plus qu'une : le
+ * bouton est enfoncé, ou il ne l'est pas. Il changeait de couleur selon la forme de la main — une
+ * couleur par pose — et c'était le symptôme visible du défaut de fond : il fallait un code couleur
+ * pour savoir dans quel mode on se trouvait, puisque la main pouvait basculer de mode sans qu'on
+ * l'ait voulu. Avec un seul geste, il n'y a plus de mode à signaler.
  *
  * Volontairement écrit en View native plutôt qu'en Compose : cette vue est redessinée à la
  * cadence de la caméra au-dessus de l'application au premier plan, et elle doit rester la plus
  * légère possible pour ne pas voler d'images à celle-ci. Un `invalidate()` sur une View qui ne
  * fait que tracer quelques primitives coûte beaucoup moins qu'un arbre de composition.
+ *
+ * Trois anneaux restent, et chacun répond à une question que l'utilisateur ne peut pas résoudre
+ * autrement : où vais-je appuyer (le réticule), mon pincement est-il en train d'aboutir (l'anneau
+ * doré), et un appui long va-t-il partir (l'anneau rouge).
  *
  * La vue est déclarée non tactile côté fenêtre : elle est purement décorative, les appuis réels
  * étant injectés par le service d'accessibilité.
@@ -31,13 +40,15 @@ class CursorOverlayView(context: Context) : View(context) {
 
     private var cursorX = 0.5f
     private var cursorY = 0.5f
-    private var gesture = GestureType.IDLE
 
-    /** Progression du geste de clic en cours, 0..1. */
-    private var clickProgress = 0f
+    /** Vrai tant que le pouce touche l'index : le bouton est enfoncé. */
+    private var pressed = false
 
-    /** Progression du maintien, 0..1 : annonce la bascule du clic vers le glisser. */
-    private var holdProgress = 0f
+    /** Progression de la fermeture en cours, 0..1. */
+    private var pinchProgress = 0f
+
+    /** Progression de l'appui long, 0..1. */
+    private var longPressProgress = 0f
     private var visible = false
 
     // Onde de confirmation du dernier appui.
@@ -71,11 +82,8 @@ class CursorOverlayView(context: Context) : View(context) {
     /** État du clavier radial, ou null quand il est fermé. */
     private var keyboard: RadialKeyboard.State? = null
 
-    /** État de la roue de commandes, ou null quand sa pose n'est pas tenue. */
-    private var wheel: CommandWheel.State? = null
-
-    /** Progression du maintien de pose, 0..1 : annonce l'action ponctuelle à venir. */
-    private var poseProgress = 0f
+    /** État du panneau de commandes. */
+    private var panel: CommandPanel.State? = null
 
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
@@ -93,16 +101,16 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     /**
-     * Affiche ou masque la roue de commandes.
+     * Affiche ou masque le panneau de commandes.
      *
-     * Elle n'est pas un mode qu'on ouvre et qu'on ferme : elle suit la pose, donc cette méthode est
-     * appelée à chaque image. Comparer avant d'invalider évite de redessiner tout l'écran pour un
-     * état identique — ce qui, sur une fenêtre de superposition, coûte directement du GPU à
-     * l'application au premier plan.
+     * Il n'est pas un mode qu'on ouvre et qu'on ferme : il suit la position de la main, donc cette
+     * méthode est appelée à chaque image. Comparer avant d'invalider évite de redessiner tout
+     * l'écran pour un état identique — ce qui, sur une fenêtre de superposition, coûte directement
+     * du GPU à l'application au premier plan.
      */
-    fun setWheel(state: CommandWheel.State?) {
-        if (state == wheel) return
-        wheel = state
+    fun setPanel(state: CommandPanel.State?) {
+        if (state == panel) return
+        panel = state
         invalidate()
     }
 
@@ -110,11 +118,10 @@ class CursorOverlayView(context: Context) : View(context) {
     fun update(
         x: Float,
         y: Float,
-        gesture: GestureType,
-        clickProgress: Float,
-        holdProgress: Float,
-        visible: Boolean,
-        poseProgress: Float = 0f
+        pressed: Boolean,
+        pinchProgress: Float,
+        longPressProgress: Float,
+        visible: Boolean
     ) {
         // Une fenêtre de superposition invalidée en continu fait recomposer tout l'écran par le
         // compositeur, y compris l'application au premier plan. Quand le curseur est masqué et
@@ -122,11 +129,10 @@ class CursorOverlayView(context: Context) : View(context) {
         val unchanged = !visible && !this.visible && !tapVisible()
         this.cursorX = x
         this.cursorY = y
-        this.gesture = gesture
-        this.clickProgress = clickProgress
-        this.holdProgress = holdProgress
+        this.pressed = pressed
+        this.pinchProgress = pinchProgress
+        this.longPressProgress = longPressProgress
         this.visible = visible
-        this.poseProgress = poseProgress
         if (unchanged) return
 
         rotation = (rotation + 2f) % 360f
@@ -166,13 +172,13 @@ class CursorOverlayView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         keyboard?.let { drawKeyboard(canvas, it) }
-        wheel?.let { drawWheel(canvas, it) }
+        panel?.let { drawPanel(canvas, it) }
         drawTapRipple(canvas)
         if (!visible) return
 
         val cx = cursorX * width
         val cy = cursorY * height
-        val accent = colorFor(gesture)
+        val accent = if (pressed) COLOR_GOLD else COLOR_CYAN
         val radius = 26f * density
 
         // Anneau de la pose : contour sombre d'abord, couleur ensuite. Le contour déborde de
@@ -211,25 +217,19 @@ class CursorOverlayView(context: Context) : View(context) {
         corePaint.color = COLOR_CORE
         canvas.drawCircle(cx, cy, 3f * density, corePaint)
 
-        // Arc de progression du clic. Tracé comme un arc et non comme un cercle plein : la part
-        // parcourue est alors lisible d'un coup d'œil, alors qu'un simple changement de rayon ou
-        // d'opacité ne dit pas à quelle distance du déclenchement on se trouve.
-        if (clickProgress > 0.02f) {
-            drawContrastedArc(canvas, cx, cy, radius * 1.45f, clickProgress, COLOR_GOLD)
+        // Arc de progression du pincement. Tracé comme un arc et non comme un cercle plein : la
+        // part parcourue est alors lisible d'un coup d'œil, alors qu'un simple changement de rayon
+        // ou d'opacité ne dit pas à quelle distance du déclenchement on se trouve.
+        if (!pressed && pinchProgress > 0.02f) {
+            drawContrastedArc(canvas, cx, cy, radius * 1.45f, pinchProgress, COLOR_GOLD)
         }
 
-        // Second arc, à l'extérieur : la bascule du clic vers le glisser. Deux anneaux distincts
-        // plutôt qu'un seul réutilisé, sans quoi on ne saurait pas lequel des deux se remplit.
-        if (holdProgress > 0.02f) {
-            drawContrastedArc(canvas, cx, cy, radius * 1.85f, holdProgress, COLOR_RED)
-        }
-
-        // Troisième arc, le plus intérieur : le maintien de la pose avant qu'une action ponctuelle
-        // ne s'exécute. C'est ce qui rend le délai acceptable plutôt que subi — sans lui,
-        // l'application semblerait simplement lente à répondre, et l'on ne saurait pas qu'il reste
-        // la possibilité d'annuler en changeant de pose.
-        if (poseProgress > 0.02f) {
-            drawContrastedArc(canvas, cx, cy, radius * 0.72f, poseProgress, COLOR_BLUE)
+        // Second arc, à l'extérieur : l'appui long qui vient. Deux anneaux distincts plutôt qu'un
+        // seul réutilisé, sans quoi on ne saurait pas lequel des deux se remplit. C'est ce qui
+        // rend l'attente lisible au lieu de subie — on voit l'appui long arriver, et bouger la
+        // main le transforme en tracé.
+        if (longPressProgress > 0.02f) {
+            drawContrastedArc(canvas, cx, cy, radius * 1.85f, longPressProgress, COLOR_RED)
         }
     }
 
@@ -317,23 +317,65 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     /**
-     * Roue de commandes : la même couronne que le clavier, avec des libellés plus longs.
+     * Panneau de commandes : une colonne de lignes au bord droit de l'écran.
      *
-     * Le voile est volontairement plus léger que celui du clavier : on écrit longuement dans le
-     * clavier, et le contenu en dessous n'a pas d'importance, alors que la roue sert à agir **sur**
-     * ce qui est affiché — masquer l'écran empêcherait de voir sur quoi on agit. Les pastilles sont
-     * plus larges parce que les libellés sont des mots et non des lettres.
+     * Une **colonne**, et non une couronne, et ce n'est pas un choix graphique. Dans une couronne,
+     * une commande se désigne par un angle, donc la précision exigée croît avec le nombre de
+     * secteurs. Dans une colonne, elle se désigne par une hauteur : la visée est à une dimension,
+     * les lignes restent de la même largeur quel qu'en soit le nombre, et les libellés tiennent
+     * sur une ligne au lieu d'être tassés dans une pastille.
+     *
+     * Les bornes dessinées viennent de [CommandPanel.rowBounds], le même calcul que celui de la
+     * sélection : une ligne dessinée ailleurs qu'à l'endroit où elle se sélectionne serait un
+     * piège, et le genre de défaut qu'on ne remarque qu'à l'usage.
      */
-    private fun drawWheel(canvas: Canvas, state: CommandWheel.State) {
-        drawRadialMenu(
-            canvas = canvas,
-            labels = state.labels,
-            hovered = state.hoveredSector,
-            progress = state.progress,
-            footer = null,
-            dim = 0.45f,
-            bubbleDp = 46f
-        )
+    private fun drawPanel(canvas: Canvas, state: CommandPanel.State) {
+        if (state.openProgress <= 0.01f || state.labels.isEmpty()) return
+
+        val model = CommandPanel()
+        val left = width * (1f - (1f - model.leftEdge) * state.openProgress)
+        val open = state.openProgress >= 1f
+
+        // Voile limité à la colonne : le panneau sert à agir **sur** ce qui est affiché, donc
+        // masquer l'écran entier empêcherait de voir sur quoi on agit. Le clavier, lui, assombrit
+        // tout — on n'y regarde pas le dessous.
+        dimPaint.color = withAlpha(0xFF040814.toInt(), 0.86f * state.openProgress)
+        canvas.drawRect(left, 0f, width.toFloat(), height.toFloat(), dimPaint)
+
+        // Liseré vertical : marque le bord du panneau même quand il n'est qu'esquissé, de sorte
+        // qu'on sache qu'il est là avant de l'avoir ouvert.
+        strengthPaint.color = withAlpha(COLOR_CYAN, 0.5f + 0.5f * state.openProgress)
+        strengthPaint.strokeWidth = ARC_WIDTH_DP * density
+        canvas.drawLine(left, 0f, left, height.toFloat(), strengthPaint)
+
+        if (!open) return
+
+        for (index in state.labels.indices) {
+            val (top, bottom) = model.rowBounds(index, state.labels.size)
+            val y0 = top * height
+            val y1 = bottom * height
+            val active = index == state.highlighted
+
+            if (active) {
+                sectorPaint.color = withAlpha(COLOR_GOLD, 0.26f)
+                canvas.drawRect(left, y0, width.toFloat(), y1, sectorPaint)
+                strengthPaint.color = COLOR_GOLD
+                strengthPaint.strokeWidth = ARC_WIDTH_DP * density
+                canvas.drawLine(left, y0, left, y1, strengthPaint)
+            }
+
+            labelPaint.color = if (active) COLOR_GOLD else COLOR_CORE
+            labelPaint.textAlign = Paint.Align.LEFT
+            val label = state.labels[index]
+            labelPaint.getTextBounds(label, 0, label.length, textBounds)
+            canvas.drawText(
+                label,
+                left + 16f * density,
+                (y0 + y1) / 2f + textBounds.height() / 2f,
+                labelPaint
+            )
+            labelPaint.textAlign = Paint.Align.CENTER
+        }
     }
 
     /**
@@ -417,20 +459,6 @@ class CursorOverlayView(context: Context) : View(context) {
         canvas.drawText(label.substring(cut + 1), x, y + gap / 2f + lineHeight / 2f, labelPaint)
     }
 
-    /**
-     * Couleur d'accent de la pose courante.
-     *
-     * Trois poses, trois couleurs, et c'est tout le vocabulaire : le cyan pointe et clique, le
-     * rouge marque la pose qui exécute une action, l'or celle qui ouvre la roue. Les couleurs ne
-     * sont pas décoratives — elles disent dans quel mode on se trouve, et c'est la seule
-     * information que le curseur ne peut pas porter par sa forme.
-     */
-    private fun colorFor(gesture: GestureType): Int = when (gesture) {
-        GestureType.FIST -> COLOR_RED
-        GestureType.OPEN_PALM -> COLOR_GOLD
-        else -> COLOR_CYAN
-    }
-
     private fun withAlpha(color: Int, alpha: Float): Int =
         Color.argb((alpha * 255).toInt().coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
 
@@ -470,11 +498,10 @@ class CursorOverlayView(context: Context) : View(context) {
          * maximum qui laisse à chaque direction 45° de tolérance, soit assez pour qu'une main qui
          * tremble reste dans son secteur.
          */
-        val SECTORS = minOf(RadialKeyboard.SECTORS, CommandWheel.SECTORS)
+        val SECTORS = RadialKeyboard.SECTORS
 
         const val COLOR_CYAN = 0xFF00F0FF.toInt()
         const val COLOR_GOLD = 0xFFFFB703.toInt()
         const val COLOR_RED = 0xFFFF0055.toInt()
-        const val COLOR_BLUE = 0xFF3D8BFF.toInt()
     }
 }

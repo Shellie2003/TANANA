@@ -16,8 +16,8 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer
-import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizerResult
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -32,15 +32,16 @@ data class HandGestureState(
     /** Position brute (avant lissage), utile au diagnostic. */
     val rawCursorX: Float = 0.5f,
     val rawCursorY: Float = 0.5f,
-    val gesture: GestureType = GestureType.IDLE,
     /**
      * Distance pouce-index normalisée par la taille de paume, brute.
-     * Alimente la détection du clic par impulsion, qui raisonne sur sa dérivée.
+     *
+     * C'est le seul bouton de l'application. Transmise brute à dessein : c'est
+     * [com.example.gesture.PinchDetector] qui la juge, contre une ligne de base apprise, et un
+     * lissage préalable lui retirerait justement la vivacité sur laquelle il se prononce.
      */
     val pinchRatio: Float = Float.MAX_VALUE,
-    /** Confiance globale de la détection, 0..1. */
+    /** Plausibilité de la détection, 0..1. */
     val confidence: Float = 0f,
-    val palmRotationDeg: Float = 0f,
     val landmarks: List<Landmark> = emptyList(),
     /** Fréquence de traitement effective (images par seconde). */
     val fps: Int = 0,
@@ -51,8 +52,6 @@ data class HandGestureState(
     val isVisionUnavailable: Boolean = false,
     /** Cause de l'indisponibilité, affichée à l'écran pour rendre la panne diagnosticable. */
     val visionError: String? = null,
-    /** Vrai sur la seule frame où la pose change : déclenche les actions ponctuelles. */
-    val isNewPose: Boolean = false,
     /** Régime de cadence courant du moteur. */
     val powerMode: PowerMode = PowerMode.IDLE,
     /** Proportion d'images économisées par la régulation de cadence, entre 0 et 1. */
@@ -64,8 +63,12 @@ interface HandGestureListener {
 }
 
 /**
- * Analyseur CameraX exécutant MediaPipe Hand Landmarker et traduisant les 21 points de repère
- * en gestes stables.
+ * Analyseur CameraX exécutant MediaPipe Hand Landmarker.
+ *
+ * Il **ne reconnaît plus aucun geste**, et c'est le changement le plus profond de la refonte : il
+ * publie une position et un écart pouce-index, rien d'autre. Le classifieur entraîné de MediaPipe
+ * a été retiré avec le vocabulaire de poses qu'il servait — `gesture_recognizer.task` est redevenu
+ * `hand_landmarker.task`, soit 554 Ko et une inférence par image en moins.
  *
  * Optimisations du chemin de frame (exécuté 30 fois par seconde, donc critique) :
  *  - sortie caméra en RGBA_8888 : supprime la conversion YUV -> RGB logicielle par image ;
@@ -82,7 +85,7 @@ class HandGestureAnalyzer(
 
     private companion object {
         const val TAG = "HandGestureAnalyzer"
-        const val MODEL_ASSET = "gesture_recognizer.task"
+        const val MODEL_ASSET = "hand_landmarker.task"
 
         /**
          * Prédiction de latence appliquée au curseur. Correspond à la latence typique de la
@@ -94,7 +97,7 @@ class HandGestureAnalyzer(
         const val GPU_FAILURE_THRESHOLD = 5
     }
 
-    private var recognizer: GestureRecognizer? = null
+    private var landmarker: HandLandmarker? = null
     private var visionUnavailable = false
     private var visionError: String? = null
     private var activeDelegate: Delegate? = null
@@ -106,7 +109,6 @@ class HandGestureAnalyzer(
     @Volatile
     private var consecutiveInferenceErrors = 0
 
-    private val classifier = GestureClassifier()
     private val cursorMapper = CursorMapper()
     private val cursorFilter = OneEuroFilter3D(
         minCutoff = 1.6f,
@@ -177,11 +179,11 @@ class HandGestureAnalyzer(
 
         val failures = mutableListOf<String>()
         for ((delegate, useBuffer, label) in attempts) {
-            val result = createRecognizer(delegate, useBuffer)
+            val result = createLandmarker(delegate, useBuffer)
             result.onSuccess { built ->
-                recognizer = built
+                landmarker = built
                 activeDelegate = delegate
-                Log.i(TAG, "GestureRecognizer initialisé ($label)")
+                Log.i(TAG, "HandLandmarker initialisé ($label)")
                 return
             }
             result.onFailure { error ->
@@ -227,14 +229,15 @@ class HandGestureAnalyzer(
     }
 
     /**
-     * Construit le reconnaisseur de gestes.
+     * Construit le détecteur de points de repère.
      *
-     * Le paquet `gesture_recognizer.task` contient le modèle de points de repère **et** le
-     * classifieur de poses : il remplace `hand_landmarker.task` au lieu de s'y ajouter, pour
-     * 554 Ko de plus. Les points de repère restent donc disponibles, et c'est essentiel — le
-     * curseur et le clic en dépendent, le classifieur ne fournissant qu'une étiquette.
+     * Retour à `hand_landmarker.task` seul. Le paquet `gesture_recognizer.task` y ajoutait un
+     * classifieur de poses entraîné, qui n'a plus d'emploi : il répondait par une étiquette parmi
+     * huit, et nous n'avons plus de vocabulaire à étiqueter. Les deux mesures qui subsistent — la
+     * position et l'écart pouce-index — se lisent dans les points de repère, et nulle part
+     * ailleurs.
      */
-    private fun createRecognizer(delegate: Delegate, useBuffer: Boolean): Result<GestureRecognizer> =
+    private fun createLandmarker(delegate: Delegate, useBuffer: Boolean): Result<HandLandmarker> =
         runCatching {
             val baseOptionsBuilder = BaseOptions.builder().setDelegate(delegate)
             if (useBuffer) {
@@ -243,7 +246,7 @@ class HandGestureAnalyzer(
                 baseOptionsBuilder.setModelAssetPath(MODEL_ASSET)
             }
 
-            val options = GestureRecognizer.GestureRecognizerOptions.builder()
+            val options = HandLandmarker.HandLandmarkerOptions.builder()
                 .setBaseOptions(baseOptionsBuilder.build())
                 // Seuils relevés par rapport aux valeurs par défaut : on préfère perdre une frame
                 // douteuse plutôt que piloter le curseur avec une détection incertaine.
@@ -259,31 +262,30 @@ class HandGestureAnalyzer(
                 }
                 .build()
 
-            GestureRecognizer.createFromOptions(context, options)
+            HandLandmarker.createFromOptions(context, options)
         }
 
     fun setSimulationMode(enabled: Boolean) {
         isSimulationActive = enabled
         cursorFilter.reset()
-        classifier.reset()
     }
 
+    /**
+     * Pilotage simulé, sans caméra : une position et un état de pincement.
+     *
+     * La signature a perdu ses poses — il n'y a plus qu'un bouton à simuler, ce qui rend la
+     * simulation fidèle plutôt qu'approximative. L'écart simulé est pris de part et d'autre de la
+     * course d'une main ordinaire, pour que le détecteur le juge comme il jugerait une vraie main.
+     */
     fun updateSimulatedPosition(
         xNormalized: Float,
         yNormalized: Float,
-        isPinching: Boolean,
-        isFist: Boolean
+        isPinching: Boolean
     ) {
         if (!isSimulationActive) return
 
         val now = nextTimestamp()
         val smoothed = cursorFilter.filter(xNormalized, yNormalized, 0.5f, now)
-
-        val gesture = when {
-            isPinching -> GestureType.POINT
-            isFist -> GestureType.FIST
-            else -> GestureType.OPEN_PALM
-        }
 
         listener.onHandGestureUpdated(
             HandGestureState(
@@ -293,7 +295,7 @@ class HandGestureAnalyzer(
                 cursorZ = 0.5f,
                 rawCursorX = xNormalized,
                 rawCursorY = yNormalized,
-                gesture = gesture,
+                pinchRatio = if (isPinching) 0.10f else 0.85f,
                 confidence = 1f,
                 fps = 60,
                 latencyMs = 0,
@@ -322,11 +324,11 @@ class HandGestureAnalyzer(
 
             demoteToCpuIfGpuFailing()
 
-            val engine = recognizer ?: return
+            val engine = landmarker ?: return
             val bitmap = buildUprightBitmap(imageProxy) ?: return
 
             inferenceStartedAt = SystemClock.uptimeMillis()
-            engine.recognizeAsync(BitmapImageBuilder(bitmap).build(), nextTimestamp())
+            engine.detectAsync(BitmapImageBuilder(bitmap).build(), nextTimestamp())
         } catch (e: Throwable) {
             Log.w(TAG, "Frame ignorée: ${e.message}")
         } finally {
@@ -344,12 +346,12 @@ class HandGestureAnalyzer(
         if (consecutiveInferenceErrors < GPU_FAILURE_THRESHOLD) return
 
         Log.w(TAG, "Delegate GPU défaillant après $consecutiveInferenceErrors erreurs : repli sur CPU")
-        recognizer?.close()
+        landmarker?.close()
         activeDelegate = Delegate.CPU
         consecutiveInferenceErrors = 0
-        recognizer = createRecognizer(Delegate.CPU, useBuffer = false).getOrNull()
-            ?: createRecognizer(Delegate.CPU, useBuffer = true).getOrNull()
-        if (recognizer == null) {
+        landmarker = createLandmarker(Delegate.CPU, useBuffer = false).getOrNull()
+            ?: createLandmarker(Delegate.CPU, useBuffer = true).getOrNull()
+        if (landmarker == null) {
             visionUnavailable = true
             visionError = "repli CPU impossible après défaillance du GPU"
             activeDelegate = null
@@ -417,7 +419,7 @@ class HandGestureAnalyzer(
         return lastTimestamp
     }
 
-    private fun processHandResult(result: GestureRecognizerResult) {
+    private fun processHandResult(result: HandLandmarkerResult) {
         consecutiveInferenceErrors = 0
         val now = SystemClock.uptimeMillis()
         if (inferenceStartedAt > 0L) {
@@ -438,15 +440,7 @@ class HandGestureAnalyzer(
         val landmarks = ArrayList<Landmark>(raw.size)
         for (p in raw) landmarks.add(Landmark(p.x(), p.y(), p.z()))
 
-        // Étiquette du classifieur entraîné, quand il se prononce. Le score géométrique reste en
-        // second rideau : le classifieur répond « None » pour toute pose intermédiaire, et sans
-        // repli l'utilisateur n'aurait alors plus rien.
-        val top = result.gestures()?.firstOrNull()?.firstOrNull()
-        val recognized = CannedGesture.from(top?.categoryName(), top?.score() ?: 0f)
-
         val metrics = HandGeometry.analyze(landmarks)
-        val gestureResult = classifier.update(metrics, now, recognized)
-
         if (metrics == null) {
             emitNoHand(now)
             return
@@ -467,13 +461,10 @@ class HandGestureAnalyzer(
                 cursorZ = smoothed.z.coerceIn(0f, 1f),
                 rawCursorX = metrics.pointerX,
                 rawCursorY = metrics.pointerY,
-                gesture = gestureResult.gesture,
                 pinchRatio = metrics.pinchRatio,
-                confidence = gestureResult.confidence,
-                isNewPose = gestureResult.isNewPose,
+                confidence = metrics.quality,
                 powerMode = frameGate.mode,
                 savingsRatio = frameGate.savingsRatio(),
-                palmRotationDeg = metrics.palmRotationDeg,
                 landmarks = landmarks,
                 fps = currentFps,
                 latencyMs = smoothedLatencyMs.toInt(),
@@ -483,8 +474,7 @@ class HandGestureAnalyzer(
     }
 
     private fun emitNoHand(now: Long) {
-        val result = classifier.update(null, now)
-        if (result.gesture == GestureType.IDLE) cursorFilter.reset()
+        cursorFilter.reset()
 
         // Sans main à suivre, l'état ne varie plus : on limite les publications à 4 Hz au lieu
         // de 30 Hz pour éviter des recompositions inutiles de toute l'interface.
@@ -498,7 +488,6 @@ class HandGestureAnalyzer(
         listener.onHandGestureUpdated(
             HandGestureState(
                 isHandDetected = false,
-                gesture = GestureType.IDLE,
                 fps = currentFps,
                 latencyMs = smoothedLatencyMs.toInt(),
                 powerMode = frameGate.mode,
@@ -513,7 +502,6 @@ class HandGestureAnalyzer(
         listener.onHandGestureUpdated(
             HandGestureState(
                 isHandDetected = false,
-                gesture = GestureType.IDLE,
                 fps = currentFps,
                 isVisionUnavailable = true,
                 visionError = visionError
@@ -523,8 +511,8 @@ class HandGestureAnalyzer(
 
     fun close() {
         frameGate.reset()
-        recognizer?.close()
-        recognizer = null
+        landmarker?.close()
+        landmarker = null
         activeDelegate = null
         reusableSource?.recycle()
         reusableSource = null

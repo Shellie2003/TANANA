@@ -35,13 +35,17 @@ import androidx.lifecycle.LifecycleRegistry
 import com.example.MainActivity
 import com.example.R
 import com.example.control.BindingsStore
-import com.example.control.GesturePolicy
+import com.example.control.Command
+import com.example.control.CommandList
+import com.example.control.PinchTelemetry
+import com.example.control.Pointer
+import com.example.control.PointerEvent
 import com.example.control.SystemAction
-import com.example.gesture.ClickDetector
-import com.example.gesture.GestureType
 import com.example.gesture.HandGestureAnalyzer
 import com.example.gesture.HandGestureListener
 import com.example.gesture.HandGestureState
+import com.example.gesture.PinchDetector
+import com.example.input.CommandPanel
 import com.example.input.RadialKeyboard
 import com.example.ui.overlay.CursorOverlayView
 import java.util.concurrent.Executors
@@ -71,7 +75,14 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private var cameraProvider: ProcessCameraProvider? = null
     private var analyzer: HandGestureAnalyzer? = null
 
-    private val policy = GesturePolicy()
+    /**
+     * Le modèle d'interaction. Reconstruit quand la fermeté du pincement change : le détecteur
+     * perd alors la course apprise, ce qui est voulu — l'utilisateur vient de changer de réglage
+     * et va enchaîner quelques gestes d'essai, qui doivent servir de nouvelle référence.
+     */
+    private var pointer = Pointer()
+    private val panel = CommandPanel()
+    private var commands = CommandList()
     private val keyboard = RadialKeyboard()
     private var keyboardOpen = false
     private lateinit var bindingsStore: BindingsStore
@@ -326,8 +337,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
 
     /** Relit les préférences et les applique à la politique de commande. */
     private fun applyPreferences() {
-        policy.updateBindings(bindingsStore.load())
-        policy.updateClickTuning(bindingsStore.loadClickTuning())
+        commands = bindingsStore.loadCommands()
+        pointer = Pointer(detector = PinchDetector(bindingsStore.loadClickTuning().toConfig()))
+        panel.reset()
     }
 
     // --- Réception des gestes ------------------------------------------------------------------
@@ -346,54 +358,85 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             cursorY = state.cursorY
         }
 
+        val now = SystemClock.uptimeMillis()
+        val events = pointer.update(
+            handPresent = state.isHandDetected,
+            quality = state.confidence,
+            x = cursorX,
+            y = cursorY,
+            pinchRatio = state.pinchRatio,
+            nowMs = now
+        )
+        pinchTelemetry = pointer.telemetry()
+
+        // Le panneau suit la position de la main : il n'a pas de bascule, donc rien à
+        // synchroniser, et on ne peut pas y rester coincé. Il reste fermé pendant la saisie, où
+        // le clavier occupe déjà l'écran.
+        if (!keyboardOpen) {
+            panel.update(cursorX, cursorY, pointer.isPressed, commands.size, now)
+        }
+
         overlayView?.update(
             x = cursorX,
             y = cursorY,
-            gesture = state.gesture,
-            // L'anneau du curseur affiche la progression réelle du geste de clic, et non plus la
-            // force brute du pincement. C'est la même grandeur que celle qui déclenche l'appui :
-            // ce que l'utilisateur voit se remplir correspond donc exactement à ce qui décide.
-            clickProgress = policy.clickProgress,
-            holdProgress = policy.holdProgress,
-            visible = state.isHandDetected && state.gesture != GestureType.IDLE,
-            poseProgress = policy.poseProgress
+            pressed = pointer.isPressed,
+            // L'anneau affiche la progression réelle du pincement : la même grandeur que celle
+            // qui décide. Ce que l'utilisateur voit se remplir correspond donc à ce qui se passe.
+            pinchProgress = pointer.pinchProgress,
+            longPressProgress = pointer.longPressProgress,
+            visible = state.isHandDetected
         )
+        overlayView?.setPanel(if (keyboardOpen) null else panel.state(commands.labels()))
 
-        // Clavier ouvert : le curseur ne pilote plus le système mais la sélection des caractères.
-        // Court-circuiter la politique ici évite qu'un appui parte dans l'application sous-jacente
-        // pendant qu'on écrit.
-        if (keyboardOpen) {
-            handleKeyboard(state)
+        when {
+            keyboardOpen -> routeToKeyboard(events, now)
+            panel.isOpen -> routeToPanel(events)
+            else -> events.forEach { dispatch(it) }
+        }
+    }
+
+    /**
+     * Panneau ouvert : il capture tout.
+     *
+     * Rien ne doit partir dans l'application du dessous pendant qu'on choisit une commande — ni
+     * l'appui qui valide, ni un tracé entamé par mégarde. C'est la même règle que pour le clavier,
+     * et pour la même raison.
+     */
+    private fun routeToPanel(events: List<PointerEvent>) {
+        if (events.none { it is PointerEvent.Tap }) return
+        val index = panel.commit() ?: return
+        val command = commands[index] ?: return
+        Log.i(TAG, "Commande : ${command.label}")
+        runCommand(command)
+    }
+
+    private fun runCommand(command: Command) {
+        if (command.action is SystemAction.ToggleKeyboard) {
+            toggleKeyboard()
             return
         }
+        if (!StarkAccessibilityService.perform(command.action, screenWidth, screenHeight)) {
+            Log.i(TAG, "Service d'accessibilité inactif : ${command.label} ignorée")
+        }
+    }
 
-        val actions = policy.onGesture(
-            gesture = state.gesture,
-            cursorX = cursorX,
-            cursorY = cursorY,
-            isNewPose = state.isNewPose,
-            timestampMs = SystemClock.uptimeMillis(),
-            pinchRatio = state.pinchRatio
-        )
+    /** Traduit un évènement de pointeur en action système, et l'exécute. */
+    private fun dispatch(event: PointerEvent) {
+        val action = when (event) {
+            is PointerEvent.Tap -> SystemAction.Tap(event.x, event.y)
+            is PointerEvent.LongPress -> SystemAction.LongPress(event.x, event.y)
+            is PointerEvent.StrokeBegin -> SystemAction.DragStart(event.x, event.y)
+            is PointerEvent.StrokeMove -> SystemAction.DragMove(event.x, event.y)
+            // Le trajet complet, et non seulement le point d'arrivée : quand la diffusion
+            // continue n'est pas disponible, le service d'accessibilité rejoue le glisser d'un
+            // bloc, et il lui faut alors les deux extrémités.
+            is PointerEvent.StrokeEnd ->
+                SystemAction.Drag(event.fromX, event.fromY, event.toX, event.toY)
+        }
 
-        clickTelemetry = policy.clickTelemetry()
-
-        // La roue suit la pose : elle n'a pas de bascule à gérer, donc rien à synchroniser. On lui
-        // demande son état à chaque image et l'affichage s'aligne — ce qui est précisément ce qui
-        // rend impossible d'y rester coincé.
-        overlayView?.setWheel(policy.wheelState())
-
-        for (action in actions) {
-            if (action is SystemAction.MoveCursor) continue
-            if (action is SystemAction.ToggleKeyboard) {
-                toggleKeyboard()
-                continue
-            }
-
-            val resolved = snapToTarget(action)
-            if (!StarkAccessibilityService.perform(resolved, screenWidth, screenHeight)) {
-                Log.i(TAG, "Service d'accessibilité inactif : $resolved ignorée")
-            }
+        val resolved = snapToTarget(action)
+        if (!StarkAccessibilityService.perform(resolved, screenWidth, screenHeight)) {
+            Log.i(TAG, "Service d'accessibilité inactif : $resolved ignorée")
         }
     }
 
@@ -432,25 +475,26 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     /**
      * Sélection au clavier radial.
      *
-     * Le poing sert de sortie : c'est la pose la plus éloignée du pointage, donc la moins
-     * susceptible d'être formée par accident en écrivant.
+     * **L'appui long en est la sortie.** Le poing servait à cela, et il n'existe plus. Réutiliser
+     * l'appui long, qui fait déjà partie du modèle et ne sert à rien d'autre pendant la saisie,
+     * évite d'inventer un geste pour une seule situation — c'est précisément le genre d'ajout qui
+     * a fini par rendre le vocabulaire incompréhensible.
+     *
+     * Le clavier valide au même pincement que le reste de l'application, et par le même détecteur :
+     * la course apprise pour cette main survit donc à l'ouverture du clavier.
      */
-    private fun handleKeyboard(state: HandGestureState) {
-        if (state.gesture == GestureType.FIST && state.isNewPose) {
+    private fun routeToKeyboard(events: List<PointerEvent>, nowMs: Long) {
+        if (events.any { it is PointerEvent.LongPress }) {
             toggleKeyboard()
             return
         }
 
-        val now = SystemClock.uptimeMillis()
-        // Le clavier valide au même clic que le reste de l'application, et par le même détecteur :
-        // la course apprise pour cette main survit donc à l'ouverture du clavier.
-        val click = policy.clickOnly(state.pinchRatio, cursorX, cursorY, now)
         val emission = keyboard.update(
             cursorX = cursorX,
             cursorY = cursorY,
-            nowMs = now,
-            commit = click == ClickDetector.Event.CLICK,
-            clickProgress = policy.clickProgress
+            nowMs = nowMs,
+            commit = events.any { it is PointerEvent.Tap },
+            clickProgress = pointer.pinchProgress
         )
         overlayView?.setKeyboard(keyboard.state())
 
@@ -467,11 +511,10 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private fun toggleKeyboard() {
         keyboardOpen = !keyboardOpen
         keyboard.reset()
-        policy.reset()
+        pointer.reset()
+        panel.reset()
         overlayView?.setKeyboard(if (keyboardOpen) keyboard.state() else null)
-        // La roue et le clavier occupent la même couronne : les laisser coexister superposerait
-        // deux menus illisibles.
-        overlayView?.setWheel(null)
+        overlayView?.setPanel(null)
         Log.i(TAG, if (keyboardOpen) "Clavier gestuel ouvert" else "Clavier gestuel fermé")
     }
 
@@ -488,7 +531,7 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         detachOverlay()
         isRunning = false
         latestState = null
-        clickTelemetry = GesturePolicy.ClickTelemetry()
+        pinchTelemetry = PinchTelemetry()
     }
 
     companion object {
@@ -515,15 +558,15 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             private set
 
         /**
-         * État courant du clic, publié pour l'écran de réglage.
+         * État courant du pincement, publié pour l'écran de réglage.
          *
-         * Le clic est le seul geste dont l'échec est silencieux : rien ne distingue, vu de
-         * l'utilisateur, un geste mal formé d'une cible manquée. Exposer la course apprise, le
+         * C'est désormais le **seul** geste, et son échec est silencieux : rien ne distingue, vu
+         * de l'utilisateur, un geste mal formé d'une cible manquée. Exposer la course apprise, le
          * taux de réussite et la cause du dernier rejet est ce qui rend le geste corrigible — et
-         * donc ce qui permet de lui faire confiance.
+         * donc ce qui permet de lui faire confiance, puisqu'il n'y a aucun repli.
          */
         @Volatile
-        var clickTelemetry: GesturePolicy.ClickTelemetry = GesturePolicy.ClickTelemetry()
+        var pinchTelemetry: PinchTelemetry = PinchTelemetry()
             private set
 
         fun start(context: Context) {

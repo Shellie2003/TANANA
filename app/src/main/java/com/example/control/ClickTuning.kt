@@ -1,20 +1,20 @@
 package com.example.control
 
-import com.example.gesture.ClickDetector
+import com.example.gesture.PinchDetector
 
 /**
- * Fermeté demandée au geste de clic.
+ * Fermeté demandée au pincement.
  *
  * La morphologie de la main est désormais apprise seule : l'écart pouce-index au repos, la course
  * disponible et le seuil de contact s'ajustent sans intervention. Il reste **une** variable que
  * seul l'utilisateur peut trancher, parce qu'elle n'est pas mesurable mais préférentielle : à
- * partir de quelle vivacité un mouvement doit-il compter comme une intention de cliquer.
+ * partir de quelle vivacité un mouvement doit-il compter comme une intention d'appuyer.
  *
  * C'est un arbitrage, pas un réglage optimal :
  *
  *  - exiger un geste vif écarte les fermetures accidentelles, mais rejette les gestes appliqués
  *    de qui débute ou a la main peu assurée ;
- *  - accepter un geste lent laisse tout le monde cliquer, au prix de quelques appuis partis en
+ *  - accepter un geste lent laisse tout le monde appuyer, au prix de quelques appuis partis en
  *    repositionnant la main.
  *
  * Proposer trois positions plutôt qu'un curseur continu est délibéré : entre deux valeurs voisines
@@ -31,7 +31,7 @@ enum class ClickTuning(
     /** Pour les gestes appliqués, l'apprentissage, ou une main peu assurée. */
     RELAXED(
         "relaxed", "Souple",
-        "Accepte les gestes lents. À choisir si vos clics ne partent pas.",
+        "Accepte les fermetures lentes. À choisir si vos appuis ne partent pas.",
         420L
     ),
 
@@ -44,12 +44,12 @@ enum class ClickTuning(
     /** Pour une cadence soutenue, au prix d'un geste qui doit être net. */
     BRISK(
         "brisk", "Vif",
-        "N'accepte qu'un contact franc. À choisir si des clics partent tout seuls.",
+        "N'accepte qu'un contact franc. À choisir si des appuis partent tout seuls.",
         170L
     );
 
     /** Configuration du détecteur correspondant à ce réglage. */
-    fun toConfig(): ClickDetector.Config = ClickDetector.Config(maxCloseMs = maxCloseMs)
+    fun toConfig(): PinchDetector.Config = PinchDetector.Config(maxCloseMs = maxCloseMs)
 
     companion object {
         val DEFAULT = STANDARD

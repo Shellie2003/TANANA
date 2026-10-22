@@ -20,9 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
@@ -43,17 +41,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
-import com.example.control.BindableAction
 import com.example.control.ClickTuning
-import com.example.control.GestureBindings
-import com.example.control.GesturePolicy
-import com.example.gesture.GestureType
+import com.example.control.Command
+import com.example.control.CommandList
+import com.example.control.PinchTelemetry
 import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
 import com.example.ui.theme.StarkCyan
@@ -73,7 +69,8 @@ data class SetupStep(
 /** État affiché du moteur gestuel. */
 data class EngineStatus(
     val isRunning: Boolean,
-    val gesture: GestureType,
+    /** Vrai quand le bouton est enfoncé : le pouce touche l'index. */
+    val isPressed: Boolean = false,
     val confidence: Float,
     val fps: Int,
     val latencyMs: Int,
@@ -82,8 +79,8 @@ data class EngineStatus(
     val powerMode: PowerMode = PowerMode.IDLE,
     /** Proportion d'images économisées par la régulation, entre 0 et 1. */
     val savingsRatio: Float = 0f,
-    /** État du geste de clic : course apprise, réussites, cause du dernier échec. */
-    val click: GesturePolicy.ClickTelemetry = GesturePolicy.ClickTelemetry()
+    /** État du pincement : course apprise, réussites, cause du dernier échec. */
+    val pinch: PinchTelemetry = PinchTelemetry()
 )
 
 /**
@@ -94,18 +91,18 @@ data class EngineStatus(
  * d'accueil de l'utilisateur.
  *
  * L'ordre reflète la progression de l'utilisateur : d'abord ce qui bloque (la configuration),
- * puis l'interrupteur principal, puis le réglage du clic, enfin l'aide-mémoire des gestes.
+ * puis l'interrupteur principal, puis le geste — il n'y en a qu'un — enfin les commandes du
+ * panneau.
  */
 @Composable
 fun StarkControlCenter(
     status: EngineStatus,
     setupSteps: List<SetupStep>,
-    bindings: GestureBindings,
+    commands: CommandList,
     clickTuning: ClickTuning,
     onToggleEngine: (Boolean) -> Unit,
     onClickTuningChange: (ClickTuning) -> Unit,
-    onRebind: (GestureType, BindableAction) -> Unit,
-    onRebindSector: (Int, BindableAction) -> Unit,
+    onToggleCommand: (Command) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val pendingSteps = setupSteps.filterNot { it.isDone }
@@ -136,35 +133,23 @@ fun StarkControlCenter(
             )
         }
 
-        // La carte du clic vient avant l'aide-mémoire : c'est le geste le plus fréquent, le seul
-        // dont l'échec soit silencieux, et donc celui dont l'utilisateur a besoin d'un retour.
+        item { SectionTitle("Le geste", "Il n'y en a qu'un : pincer.") }
+        item { GestureGuide() }
+
+        // La carte du pincement vient ensuite : c'est le seul geste, le seul dont l'échec soit
+        // silencieux, et donc celui dont l'utilisateur a besoin d'un retour chiffré.
         if (status.isRunning) {
-            item { SectionTitle("Clic", "Contact bref : clic. Contact maintenu : le doigt se pose.") }
-            item { ClickCard(status.click, clickTuning, onClickTuningChange) }
+            item { SectionTitle("Réglage du pincement", "La course de votre main s'apprend seule.") }
+            item { PinchCard(status.pinch, clickTuning, onClickTuningChange) }
         }
 
         item {
             SectionTitle(
-                "Trois poses",
-                "Zéro, un et cinq doigts. Touchez une ligne pour changer son action."
+                "Commandes du panneau",
+                "${commands.size} commandes. Amenez le curseur au bord droit pour l'ouvrir."
             )
         }
-        item {
-            GestureLegend(
-                docs = POSE_DOCS,
-                activeGesture = status.gesture,
-                bindings = bindings,
-                onRebind = onRebind
-            )
-        }
-
-        item {
-            SectionTitle(
-                "Roue de commandes",
-                "Main ouverte, puis une direction. Huit commandes, lisibles à l'écran."
-            )
-        }
-        item { WheelLegend(bindings = bindings, onRebind = onRebindSector) }
+        item { CommandEditor(commands = commands, onToggle = onToggleCommand) }
     }
 }
 
@@ -428,8 +413,8 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
  * temps réel, la part de gestes aboutis, et la cause nommée du dernier échec.
  */
 @Composable
-private fun ClickCard(
-    click: GesturePolicy.ClickTelemetry,
+private fun PinchCard(
+    click: PinchTelemetry,
     tuning: ClickTuning,
     onTuningChange: (ClickTuning) -> Unit
 ) {
@@ -472,7 +457,7 @@ private fun ClickCard(
 
             Spacer(Modifier.height(14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric("Clics", "${click.clicks}", Modifier.weight(1f))
+                Metric("Appuis", "${click.presses}", Modifier.weight(1f))
                 Metric(
                     "Réussite",
                     rate?.let { "${(it * 100).toInt()} %" } ?: "—",
@@ -537,247 +522,143 @@ private fun ClickCard(
     }
 }
 
-/** Description d'un geste dans l'aide-mémoire. */
-private data class GestureDoc(
-    val gesture: GestureType,
-    val icon: ImageVector,
-    val name: String,
-    /** Comment former le geste. Sans cette phrase, le nom seul se prête à plusieurs lectures. */
-    val hint: String,
-    val color: Color
-)
-
 /**
- * Les trois poses, et rien d'autre.
+ * Ce qu'il y a à apprendre, en entier.
  *
- * Elles sont décrites par le **nombre de doigts tendus** — zéro, un, cinq — parce que c'est à cela
- * qu'elles se distinguent et que c'est la seule chose à retenir. Les décomptes intermédiaires ne
- * correspondent à aucune pose : passer de l'une à l'autre ne peut donc rien déclencher au passage.
+ * Le tableau tient en trois lignes, et c'est l'essentiel de ce qui a changé. Il y avait avant une
+ * ligne par pose — huit, puis six, puis trois — plus une roue de huit directions, soit onze signes
+ * à retenir avant de pouvoir se servir du téléphone. Le vocabulaire est désormais celui d'une
+ * souris à un bouton : personne n'a à apprendre une souris.
  */
-private val POSE_DOCS = listOf(
-    GestureDoc(
-        GestureType.POINT, Icons.Default.TouchApp, "Index seul — 1 doigt",
-        "Déplace le curseur. Pouce contre index : clic. Contact maintenu : le doigt se pose " +
-            "et suit la main — c'est ce qui fait défiler, glisser et balayer.", StarkCyan
-    ),
-    GestureDoc(
-        GestureType.FIST, Icons.Default.ArrowBack, "Poing — 0 doigt",
-        "Main fermée, pouce rentré. Tenez la pose un instant : l'anneau du curseur se remplit " +
-            "avant l'exécution, et changer de pose annule.", StarkRed
-    ),
-    GestureDoc(
-        GestureType.OPEN_PALM, Icons.Default.PlayArrow, "Main ouverte — 5 doigts",
-        "Les cinq doigts écartés, paume vers la caméra. Ouvre la roue : visez une direction, " +
-            "cliquez pour valider. Refermer la main sans cliquer n'exécute rien.", StarkGold
+@Composable
+private fun GestureGuide() {
+    val steps = listOf(
+        Triple(
+            Icons.Default.TouchApp,
+            "Pincer et relâcher",
+            "Appui. C'est le clic. Le pouce touche l'index, et le doigt sent le geste partir."
+        ),
+        Triple(
+            Icons.Default.UnfoldMore,
+            "Pincer et déplacer la main",
+            "Le doigt se pose et suit la main : défilement, balayage, glisser-déposer. " +
+                "Rien n'est reconnu — c'est Android qui interprète, comme un doigt sur la vitre."
+        ),
+        Triple(
+            Icons.Default.RadioButtonUnchecked,
+            "Pincer et rester immobile",
+            "Appui long. L'anneau rouge se remplit autour du curseur ; bouger la main le " +
+                "transforme en défilement."
+        )
     )
-)
-
-/** Noms des huit directions de la roue, dans le sens horaire depuis le haut. */
-private val WHEEL_DIRECTIONS = listOf(
-    "Haut", "Haut-droite", "Droite", "Bas-droite",
-    "Bas", "Bas-gauche", "Gauche", "Haut-gauche"
-)
-
-/**
- * Aide-mémoire des gestes, doublé de l'écran de personnalisation.
- *
- * Les deux sont confondus à dessein : la liste qui apprend le vocabulaire est celle qui permet de
- * le modifier. Séparer « aide » et « réglages » obligerait à mémoriser la correspondance avant de
- * pouvoir la changer.
- *
- * La ligne du geste en cours s'illumine, ce qui donne un retour immédiat pendant l'apprentissage.
- */
-@Composable
-private fun GestureLegend(
-    docs: List<GestureDoc>,
-    activeGesture: GestureType,
-    bindings: GestureBindings,
-    onRebind: (GestureType, BindableAction) -> Unit
-) {
-    var editing by remember { mutableStateOf<GestureType?>(null) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (doc in docs) {
-            val isActive = doc.gesture == activeGesture
-            val bound = bindings[doc.gesture]
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(
-                        if (isActive) doc.color.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.04f)
-                    )
-                    .border(
-                        1.dp,
-                        if (isActive) doc.color else Color.Transparent,
-                        RoundedCornerShape(14.dp)
-                    )
-                    .clickable {
-                        editing = if (editing == doc.gesture) null else doc.gesture
-                    }
-                    .padding(horizontal = 14.dp, vertical = 12.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(doc.icon, null, tint = doc.color, modifier = Modifier.size(22.dp))
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = doc.name,
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
-                        )
-                        Text(
-                            text = bound.label,
-                            color = doc.color.copy(alpha = 0.9f),
-                            fontSize = 12.sp
-                        )
-                    }
-                    Icon(
-                        imageVector = Icons.Default.UnfoldMore,
-                        contentDescription = "Changer l'action",
-                        tint = Color.White.copy(alpha = 0.35f),
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                if (editing == doc.gesture) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = doc.hint,
-                        color = Color.White.copy(alpha = 0.6f),
-                        fontSize = 11.sp
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = bound.description,
-                        color = Color.White.copy(alpha = 0.5f),
-                        fontSize = 11.sp
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    ActionPicker(
-                        options = BindableAction.assignableTo(doc.gesture),
-                        current = bound,
-                        onPick = {
-                            onRebind(doc.gesture, it)
-                            editing = null
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Les huit directions de la roue, chacune réaffectable.
- *
- * Présentées comme des directions et non comme des gestes, parce que c'en sont : il n'y a pas huit
- * signes à apprendre, il y a une pose et un cadran. C'est ce qui permet d'avoir beaucoup de
- * commandes sans que leur nombre pèse sur la fiabilité de la reconnaissance.
- */
-@Composable
-private fun WheelLegend(
-    bindings: GestureBindings,
-    onRebind: (Int, BindableAction) -> Unit
-) {
-    var editing by remember { mutableStateOf<Int?>(null) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for ((index, bound) in bindings.wheelSlots()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color.White.copy(alpha = 0.04f))
-                    .clickable { editing = if (editing == index) null else index }
-                    .padding(horizontal = 14.dp, vertical = 12.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.RadioButtonUnchecked, null,
-                        tint = StarkGold, modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = WHEEL_DIRECTIONS.getOrElse(index) { "Direction $index" },
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = bound.label,
-                            color = StarkGold.copy(alpha = 0.9f),
-                            fontSize = 12.sp
-                        )
-                    }
-                    Icon(
-                        imageVector = Icons.Default.UnfoldMore,
-                        contentDescription = "Changer l'action",
-                        tint = Color.White.copy(alpha = 0.35f),
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                if (editing == index) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = bound.description,
-                        color = Color.White.copy(alpha = 0.5f),
-                        fontSize = 11.sp
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    ActionPicker(
-                        // Un secteur se vise puis se valide : il n'a pas de durée, donc les rôles
-                        // continus ne lui sont pas proposés plutôt que de l'être puis d'être
-                        // ignorés silencieusement.
-                        options = BindableAction.assignableToSector(),
-                        current = bound,
-                        onPick = {
-                            onRebind(index, it)
-                            editing = null
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** Liste des actions assignables. */
-@Composable
-private fun ActionPicker(
-    options: List<BindableAction>,
-    current: BindableAction,
-    onPick: (BindableAction) -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (action in options) {
-            val selected = action == current
+        for ((icon, title, detail) in steps) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(
-                        if (selected) StarkCyan.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.03f)
-                    )
-                    .clickable { onPick(action) }
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(alpha = 0.05f))
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
             ) {
-                Text(
-                    text = action.label,
-                    color = if (selected) StarkCyan else Color.White.copy(alpha = 0.85f),
-                    fontSize = 13.sp,
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.weight(1f)
-                )
-                if (selected) {
-                    Icon(Icons.Default.CheckCircle, null, tint = StarkCyan, modifier = Modifier.size(16.dp))
+                Icon(icon, null, tint = StarkCyan, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        detail,
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
                 }
             }
         }
+
+        Text(
+            text = "La forme de la main n'a aucune importance : gardez-la détendue, bras baissé. " +
+                "Aucune pose n'est reconnue, donc aucune ne peut être confondue.",
+            color = StarkCyan.copy(alpha = 0.75f),
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
+    }
+}
+
+/**
+ * Choix des commandes du panneau.
+ *
+ * Toucher une ligne la fait entrer ou sortir du panneau. Les commandes retenues y apparaissent
+ * dans l'ordre où elles ont été ajoutées, ce qui rend l'ordre prévisible sans demander de
+ * réordonner quoi que ce soit.
+ *
+ * Il n'y a plus rien à associer : aucun réglage ne peut rendre un geste impossible, puisqu'il n'y
+ * a qu'un geste et qu'il n'est pas configurable. C'est la différence de fond avec l'écran
+ * précédent, où choisir une association demandait de deviner quelles formes de main on
+ * parviendrait à produire de façon fiable.
+ */
+@Composable
+private fun CommandEditor(commands: CommandList, onToggle: (Command) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (command in Command.entries) {
+            val position = commands.commands.indexOf(command)
+            val selected = position >= 0
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (selected) StarkGold.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.04f)
+                    )
+                    .border(
+                        1.dp,
+                        if (selected) StarkGold.copy(alpha = 0.5f) else Color.Transparent,
+                        RoundedCornerShape(12.dp)
+                    )
+                    .clickable { onToggle(command) }
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (selected) "${position + 1}" else "·",
+                    color = if (selected) StarkGold else Color.White.copy(alpha = 0.3f),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(22.dp)
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = command.label,
+                        color = if (selected) Color.White else Color.White.copy(alpha = 0.7f),
+                        fontSize = 14.sp,
+                        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
+                    )
+                    Text(
+                        text = command.description,
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 10.sp
+                    )
+                }
+                if (selected) {
+                    Icon(
+                        Icons.Default.CheckCircle, null,
+                        tint = StarkGold, modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+
+        Text(
+            text = "Plus il y a de lignes, plus elles sont étroites : c'est le seul arbitrage, " +
+                "et il se voit tout de suite.",
+            color = Color.White.copy(alpha = 0.4f),
+            fontSize = 10.sp,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
     }
 }

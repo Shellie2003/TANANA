@@ -66,11 +66,6 @@ class StarkAccessibilityService : AccessibilityService() {
                 strokeEnd()
                 longPress(action.x * width, action.y * height)
             }
-            is SystemAction.DoubleTap -> {
-                tap(action.x * width, action.y * height)
-                mainHandler.postDelayed({ tap(action.x * width, action.y * height) }, DOUBLE_TAP_GAP_MS)
-            }
-
             // Le doigt se pose, suit la main, puis se lève. Si la diffusion continue est
             // indisponible — Android 7, ou refus du système — `streaming` reste faux et le
             // glisser complet émis au relâchement prend le relais.
@@ -86,9 +81,6 @@ class StarkAccessibilityService : AccessibilityService() {
                         action.toX * width, action.toY * height
                     )
                 }
-
-            is SystemAction.Scroll -> scroll(action.amount, width, height, vertical = true)
-            is SystemAction.ScrollHorizontal -> scroll(action.amount, width, height, vertical = false)
 
             SystemAction.Back -> global(GLOBAL_ACTION_BACK)
             SystemAction.Home -> global(GLOBAL_ACTION_HOME)
@@ -130,8 +122,7 @@ class StarkAccessibilityService : AccessibilityService() {
             SystemAction.SwitchNext -> quickSwitch(forward = true, width = width, height = height)
             SystemAction.SwitchPrevious -> quickSwitch(forward = false, width = width, height = height)
 
-            // Purement visuelles ou traitées ailleurs.
-            is SystemAction.MoveCursor,
+            // Traitées ailleurs.
             SystemAction.ToggleKeyboard,
             SystemAction.None -> Unit
         }
@@ -222,34 +213,6 @@ class StarkAccessibilityService : AccessibilityService() {
         val distance = hypot(toX - fromX, toY - fromY)
         val duration = (distance / 2f).toLong().coerceIn(MIN_DRAG_MS, MAX_DRAG_MS)
         dispatch(path, duration)
-    }
-
-    /**
-     * Défilement synthétisé par un glisser vertical au centre de l'écran.
-     *
-     * [amount] est une fraction de hauteur d'écran ; positif fait descendre le contenu, donc
-     * correspond à un glisser du haut vers le bas.
-     */
-    private fun scroll(amount: Float, width: Float, height: Float, vertical: Boolean) {
-        if (abs(amount) < 1e-3f) return
-
-        val span = if (vertical) height else width
-        val travel = (amount * span).coerceIn(-span * 0.6f, span * 0.6f)
-
-        // Le trajet est centré pour rester dans la zone défilable quelle que soit la mise en page,
-        // et ne jamais empiéter sur les zones de gestes système des bords.
-        val path = Path().apply {
-            if (vertical) {
-                val startY = (height / 2f - travel / 2f).coerceIn(height * 0.2f, height * 0.8f)
-                moveTo(width / 2f, startY)
-                lineTo(width / 2f, (startY + travel).coerceIn(height * 0.15f, height * 0.85f))
-            } else {
-                val startX = (width / 2f - travel / 2f).coerceIn(width * 0.2f, width * 0.8f)
-                moveTo(startX, height / 2f)
-                lineTo((startX + travel).coerceIn(width * 0.15f, width * 0.85f), height / 2f)
-            }
-        }
-        dispatch(path, SCROLL_DURATION_MS)
     }
 
     /**
@@ -504,10 +467,8 @@ class StarkAccessibilityService : AccessibilityService() {
 
         private const val TAP_DURATION_MS = 60L
         private const val LONG_PRESS_MS = 700L
-        private const val DOUBLE_TAP_GAP_MS = 120L
         private const val MIN_DRAG_MS = 120L
         private const val MAX_DRAG_MS = 600L
-        private const val SCROLL_DURATION_MS = 180L
         private const val QUICK_SWITCH_MS = 220L
 
         /**

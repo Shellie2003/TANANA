@@ -20,11 +20,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import com.example.control.BindableAction
+import com.example.control.Command
 import com.example.control.BindingsStore
 import com.example.control.ClickTuning
-import com.example.control.GestureBindings
-import com.example.gesture.GestureType
+import com.example.control.CommandList
 import com.example.power.PowerMode
 import com.example.service.StarkAccessibilityService
 import com.example.service.StarkVisionService
@@ -56,10 +55,10 @@ class MainActivity : ComponentActivity() {
     private var notificationsGranted by mutableStateOf(true)
 
     private var status by mutableStateOf(
-        EngineStatus(false, GestureType.IDLE, 0f, 0, 0, null)
+        EngineStatus(isRunning = false, confidence = 0f, fps = 0, latencyMs = 0, visionError = null)
     )
     private lateinit var bindingsStore: BindingsStore
-    private var bindings by mutableStateOf(GestureBindings())
+    private var commands by mutableStateOf(CommandList())
     private var clickTuning by mutableStateOf(ClickTuning.DEFAULT)
 
     private val requestCamera = registerForActivityResult(
@@ -74,7 +73,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         bindingsStore = BindingsStore(this)
-        bindings = bindingsStore.load()
+        commands = bindingsStore.loadCommands()
         clickTuning = bindingsStore.loadClickTuning()
         refreshPermissions()
 
@@ -87,14 +86,14 @@ class MainActivity : ComponentActivity() {
                         val state = StarkVisionService.latestState
                         status = EngineStatus(
                             isRunning = StarkVisionService.isRunning,
-                            gesture = state?.gesture ?: GestureType.IDLE,
+                            isPressed = StarkVisionService.pinchTelemetry.progress >= 1f,
                             confidence = state?.confidence ?: 0f,
                             fps = state?.fps ?: 0,
                             latencyMs = state?.latencyMs ?: 0,
                             visionError = state?.visionError,
                             powerMode = state?.powerMode ?: PowerMode.IDLE,
                             savingsRatio = state?.savingsRatio ?: 0f,
-                            click = StarkVisionService.clickTelemetry
+                            pinch = StarkVisionService.pinchTelemetry
                         )
                         delay(200)
                     }
@@ -104,12 +103,11 @@ class MainActivity : ComponentActivity() {
                     StarkControlCenter(
                         status = status,
                         setupSteps = buildSetupSteps(),
-                        bindings = bindings,
+                        commands = commands,
                         clickTuning = clickTuning,
                         onToggleEngine = ::toggleEngine,
                         onClickTuningChange = ::applyClickTuning,
-                        onRebind = ::rebind,
-                        onRebindSector = ::rebindSector
+                        onToggleCommand = ::toggleCommand
                     )
                 }
             }
@@ -211,21 +209,14 @@ class MainActivity : ComponentActivity() {
     )
 
     /**
-     * Enregistre une nouvelle association et la transmet au service.
+     * Fait entrer ou sortir une commande du panneau, et transmet le changement au service.
      *
      * Le service relit sa configuration à chaque démarrage ; on le relance donc s'il tourne, pour
      * que le changement prenne effet immédiatement plutôt qu'au prochain lancement.
      */
-    private fun rebind(gesture: GestureType, action: BindableAction) {
-        bindings = bindings.with(gesture, action)
-        bindingsStore.save(bindings)
-        if (StarkVisionService.isRunning) StarkVisionService.start(this)
-    }
-
-    /** Même chose pour une direction de la roue de commandes. */
-    private fun rebindSector(sector: Int, action: BindableAction) {
-        bindings = bindings.withSector(sector, action)
-        bindingsStore.save(bindings)
+    private fun toggleCommand(command: Command) {
+        commands = commands.toggled(command)
+        bindingsStore.saveCommands(commands)
         if (StarkVisionService.isRunning) StarkVisionService.start(this)
     }
 
