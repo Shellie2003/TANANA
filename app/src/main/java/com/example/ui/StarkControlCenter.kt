@@ -45,11 +45,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
 import com.example.BuildConfig
+import com.example.R
 import com.example.control.ClickTuning
 import com.example.control.Command
 import com.example.control.CommandList
 import com.example.control.PinchTelemetry
+import com.example.control.ScrollTuning
 import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
 import com.example.ui.theme.StarkCyan
@@ -86,8 +89,8 @@ data class EngineStatus(
 /**
  * Écran principal.
  *
- * Cet écran ne lance rien. Il a comporté une grille d'applications, retirée : NEXUS est un
- * contrôleur, et lui faire tenir aussi le rôle de lanceur le mettait en concurrence avec l'écran
+ * Cet écran ne lance rien. Il a comporté une grille d'applications, retirée : l'application est un
+ * contrôleur, et lui faire tenir aussi le rôle de lanceur la mettait en concurrence avec l'écran
  * d'accueil de l'utilisateur.
  *
  * L'ordre reflète la progression de l'utilisateur : d'abord ce qui bloque (la configuration),
@@ -100,8 +103,10 @@ fun StarkControlCenter(
     setupSteps: List<SetupStep>,
     commands: CommandList,
     clickTuning: ClickTuning,
+    scrollTuning: ScrollTuning,
     onToggleEngine: (Boolean) -> Unit,
     onClickTuningChange: (ClickTuning) -> Unit,
+    onScrollTuningChange: (ScrollTuning) -> Unit,
     onToggleCommand: (Command) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -143,6 +148,9 @@ fun StarkControlCenter(
             item { PinchCard(status.pinch, clickTuning, onClickTuningChange) }
         }
 
+        item { SectionTitle("Défilement", "Pincez et déplacez la main ; relâchez en mouvement pour lancer l'inertie.") }
+        item { ScrollCard(scrollTuning, onScrollTuningChange) }
+
         item {
             SectionTitle(
                 "Commandes du panneau",
@@ -157,7 +165,9 @@ fun StarkControlCenter(
 private fun Header(status: EngineStatus) {
     Column {
         Text(
-            text = "NEXUS",
+            // Lu dans les ressources, et non écrit en dur : c'est le même nom que celui affiché
+            // par le système, donc il ne peut pas en diverger au prochain renommage.
+            text = stringResource(R.string.app_name),
             color = Color.White,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -479,13 +489,72 @@ private fun PinchCard(
         }
 
         // Le réglage reste accessible pendant la calibration : « Souple » est précisément ce dont
-        // a besoin quelqu'un dont les clics ne partent pas, et donc dont la main est mal suivie.
+        // a besoin quelqu'un dont les appuis ne partent pas, et donc dont la main est mal suivie.
         Spacer(Modifier.height(14.dp))
-        Text("Fermeté du geste", color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+        ThreeWayPicker(
+            title = "Fermeté du geste",
+            options = ClickTuning.entries,
+            current = tuning,
+            label = { it.label },
+            description = { it.description },
+            onPick = onTuningChange
+        )
+    }
+}
+
+/**
+ * Carte du défilement.
+ *
+ * Le gain était une constante du code, et donc une valeur qu'aucun usage ne pouvait corriger sans
+ * un aller-retour. C'est la seule part du geste qui ne s'apprend pas toute seule, parce qu'elle
+ * n'est pas mesurable mais préférentielle : de combien le contenu doit avancer pour un déplacement
+ * de main donné.
+ */
+@Composable
+private fun ScrollCard(tuning: ScrollTuning, onTuningChange: (ScrollTuning) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.05f))
+            .border(1.dp, StarkCyan.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        ThreeWayPicker(
+            title = "Vivacité du défilement",
+            options = ScrollTuning.entries,
+            current = tuning,
+            label = { it.label },
+            description = { it.description },
+            onPick = onTuningChange
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Le début du geste reste toujours au rapport 1:1 : un petit ajustement est " +
+                "exact quelle que soit la position choisie.",
+            color = Color.White.copy(alpha = 0.4f),
+            fontSize = 10.sp,
+            lineHeight = 14.sp
+        )
+    }
+}
+
+/** Sélecteur à trois positions, partagé par les réglages de fermeté et de vivacité. */
+@Composable
+private fun <T> ThreeWayPicker(
+    title: String,
+    options: List<T>,
+    current: T,
+    label: (T) -> String,
+    description: (T) -> String,
+    onPick: (T) -> Unit
+) {
+    Column {
+        Text(title, color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (option in ClickTuning.entries) {
-                val selected = option == tuning
+            for (option in options) {
+                val selected = option == current
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -499,12 +568,12 @@ private fun PinchCard(
                             if (selected) StarkGold else Color.Transparent,
                             RoundedCornerShape(10.dp)
                         )
-                        .clickable { onTuningChange(option) }
+                        .clickable { onPick(option) }
                         .padding(vertical = 10.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = option.label,
+                        text = label(option),
                         color = if (selected) StarkGold else Color.White.copy(alpha = 0.75f),
                         fontSize = 12.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
@@ -514,7 +583,7 @@ private fun PinchCard(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            text = tuning.description,
+            text = description(current),
             color = Color.White.copy(alpha = 0.45f),
             fontSize = 10.sp,
             lineHeight = 14.sp

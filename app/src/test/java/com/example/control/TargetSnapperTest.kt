@@ -18,7 +18,23 @@ class TargetSnapperTest {
 
     @Test
     fun `un appui dans une cible retient cette cible`() {
-        assertEquals(button, TargetSnapper.snap(450f, 1050f, listOf(button), radius))
+        assertEquals(button, TargetSnapper.snap(450f, 1050f, listOf(button), radius)?.target)
+    }
+
+    /**
+     * **Le défaut de précision principal, et sa correction.** Un appui déjà dans la cible était
+     * ramené à son centre. Dans un champ de texte, le curseur partait donc toujours au milieu ;
+     * sur un réglage de volume, seule la position médiane était atteignable ; dans une carte ou
+     * une image, on visait le centre quoi qu'on fasse. Être dedans, c'est avoir réussi son geste :
+     * il n'y a rien à corriger.
+     */
+    @Test
+    fun `un appui deja dans la cible n est pas deplace`() {
+        val champ = target(0f, 900f, 1080f, 1100f)
+        val snap = requireNotNull(TargetSnapper.snap(120f, 1000f, listOf(champ), radius))
+        assertEquals(120f, snap.x, 1e-3f)
+        assertEquals(1000f, snap.y, 1e-3f)
+        assertTrue("l'appui a été déplacé alors qu'il était déjà dans la cible", !snap.moved)
     }
 
     /**
@@ -27,9 +43,11 @@ class TargetSnapperTest {
      */
     @Test
     fun `un appui juste a cote est ramene sur la cible`() {
-        val snapped = TargetSnapper.snap(620f, 1050f, listOf(button), radius)
-        assertEquals(button, snapped)
-        assertEquals(500f, snapped!!.centerX, 1e-3f)
+        val snapped = requireNotNull(TargetSnapper.snap(620f, 1050f, listOf(button), radius))
+        assertEquals(button, snapped.target)
+        assertEquals("c'est le seul cas où déplacer l'appui sert à quelque chose", 500f, snapped.x, 1e-3f)
+        assertEquals(1060f, snapped.y, 1e-3f)
+        assertTrue(snapped.moved)
     }
 
     /**
@@ -46,7 +64,7 @@ class TargetSnapperTest {
     fun `la cible la plus proche l emporte`() {
         val left = target(100f, 1000f, 200f, 1100f)
         val right = target(900f, 1000f, 1000f, 1100f)
-        assertEquals(left, TargetSnapper.snap(240f, 1050f, listOf(left, right), radius))
+        assertEquals(left, TargetSnapper.snap(240f, 1050f, listOf(left, right), radius)?.target)
     }
 
     /**
@@ -57,7 +75,7 @@ class TargetSnapperTest {
     fun `entre deux cibles imbriquees la plus petite l emporte`() {
         val row = target(0f, 1000f, 1080f, 1200f)
         val icon = target(900f, 1050f, 1000f, 1150f)
-        assertEquals(icon, TargetSnapper.snap(950f, 1100f, listOf(row, icon), radius))
+        assertEquals(icon, TargetSnapper.snap(950f, 1100f, listOf(row, icon), radius)?.target)
     }
 
     /** Être à l'intérieur d'une cible est sans ambiguïté, même si une autre est plus proche du bord. */
@@ -65,7 +83,7 @@ class TargetSnapperTest {
     fun `une cible contenant le point prime sur une voisine plus proche`() {
         val inside = target(400f, 1000f, 700f, 1300f)
         val neighbour = target(710f, 1140f, 760f, 1160f)
-        assertEquals(inside, TargetSnapper.snap(695f, 1150f, listOf(inside, neighbour), radius))
+        assertEquals(inside, TargetSnapper.snap(695f, 1150f, listOf(inside, neighbour), radius)?.target)
     }
 
     @Test
@@ -109,8 +127,8 @@ class TargetSnapperTest {
         // Fondé sur la plus petite dimension : le même écart en pixels aimante horizontalement
         // comme verticalement, alors qu'un rayon exprimé en fraction d'écran ne le ferait pas.
         assertEquals(screenW * 0.06f, TargetSnapper.defaultRadius(screenW, screenH), 1e-3f)
-        val horizontal = TargetSnapper.snap(600f + radius - 1f, 1060f, listOf(button), radius)
-        val vertical = TargetSnapper.snap(500f, 1120f + radius - 1f, listOf(button), radius)
+        val horizontal = TargetSnapper.snap(600f + radius - 1f, 1060f, listOf(button), radius)?.target
+        val vertical = TargetSnapper.snap(500f, 1120f + radius - 1f, listOf(button), radius)?.target
         assertEquals(button, horizontal)
         assertEquals(button, vertical)
     }

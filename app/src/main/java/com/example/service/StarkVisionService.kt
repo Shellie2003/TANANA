@@ -450,6 +450,11 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
      * La cible retenue est dessinée : une aimantation invisible se comporterait comme un curseur
      * qui ment. En la montrant, l'utilisateur voit ce qui a réellement été touché — et apprend
      * du même coup jusqu'où il peut se permettre d'être approximatif.
+     *
+     * **Un appui déjà dans la cible n'est pas déplacé.** Il l'était, ramené au centre, et c'était
+     * le principal défaut de précision : dans un champ de texte le curseur partait toujours au
+     * milieu, sur un réglage de volume on ne pouvait atteindre que la position médiane, et dans une
+     * carte ou une image on visait le centre quoi qu'on fasse.
      */
     private fun snapToTarget(action: SystemAction): SystemAction {
         val (x, y) = when (action) {
@@ -460,10 +465,10 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             else -> return action
         }
 
-        val target = StarkAccessibilityService.snapTarget(x, y, screenWidth, screenHeight)
-        val px = target?.centerX ?: x
-        val py = target?.centerY ?: y
-        overlayView?.flashTap(px, py, target)
+        val snap = StarkAccessibilityService.snapTarget(x, y, screenWidth, screenHeight)
+        val px = snap?.x ?: x
+        val py = snap?.y ?: y
+        overlayView?.flashTap(px, py, snap?.target)
 
         return when (action) {
             is SystemAction.Tap -> SystemAction.Tap(px, py)

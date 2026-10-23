@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 import com.example.control.Command
 import com.example.control.BindingsStore
 import com.example.control.ClickTuning
+import com.example.control.ScrollTuning
 import com.example.control.CommandList
 import com.example.power.PowerMode
 import com.example.service.StarkAccessibilityService
@@ -36,10 +37,10 @@ import kotlinx.coroutines.delay
 /**
  * Écran de configuration du contrôleur gestuel.
  *
- * NEXUS n'est pas un lanceur. Il l'a été, et c'était une erreur de périmètre : présenter une
+ * L'application n'est pas un lanceur. Il l'a été, et c'était une erreur de périmètre : présenter une
  * grille d'applications en faisait un candidat au rôle d'écran d'accueil, ce qui entrait en
  * conflit avec le lanceur de l'utilisateur et rendait ambiguë l'action « Accueil » du contrôle
- * gestuel — elle pouvait ramener sur NEXUS lui-même. L'écran ne sert donc plus qu'à configurer,
+ * gestuel — elle pouvait y ramener. L'écran ne sert donc plus qu'à configurer,
  * allumer et observer le contrôleur.
  *
  * L'activité ne pilote plus la caméra elle-même. Toute la vision vit désormais dans
@@ -60,6 +61,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var bindingsStore: BindingsStore
     private var commands by mutableStateOf(CommandList())
     private var clickTuning by mutableStateOf(ClickTuning.DEFAULT)
+    private var scrollTuning by mutableStateOf(ScrollTuning.DEFAULT)
 
     private val requestCamera = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -75,6 +77,7 @@ class MainActivity : ComponentActivity() {
         bindingsStore = BindingsStore(this)
         commands = bindingsStore.loadCommands()
         clickTuning = bindingsStore.loadClickTuning()
+        scrollTuning = bindingsStore.loadScrollTuning()
         refreshPermissions()
 
         setContent {
@@ -105,8 +108,10 @@ class MainActivity : ComponentActivity() {
                         setupSteps = buildSetupSteps(),
                         commands = commands,
                         clickTuning = clickTuning,
+                        scrollTuning = scrollTuning,
                         onToggleEngine = ::toggleEngine,
                         onClickTuningChange = ::applyClickTuning,
+                        onScrollTuningChange = ::applyScrollTuning,
                         onToggleCommand = ::toggleCommand
                     )
                 }
@@ -231,6 +236,17 @@ class MainActivity : ComponentActivity() {
         clickTuning = tuning
         bindingsStore.saveClickTuning(tuning)
         if (StarkVisionService.isRunning) StarkVisionService.start(this)
+    }
+
+    /**
+     * Enregistre la vivacité du défilement.
+     *
+     * Aucun redémarrage de service n'est nécessaire : le service d'accessibilité relit ce réglage
+     * au début de chaque tracé, précisément pour que le changement prenne effet au geste suivant.
+     */
+    private fun applyScrollTuning(tuning: ScrollTuning) {
+        scrollTuning = tuning
+        bindingsStore.saveScrollTuning(tuning)
     }
 
     private fun toggleEngine(enabled: Boolean) {

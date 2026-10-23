@@ -11,6 +11,8 @@ import android.view.KeyEvent
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.control.BindingsStore
+import com.example.control.ScrollTuning
 import com.example.control.StrokeKinematics
 import com.example.control.SystemAction
 import com.example.control.TargetSnapper
@@ -72,6 +74,7 @@ class StarkAccessibilityService : AccessibilityService() {
             // glisser complet émis au relâchement prend le relais.
             is SystemAction.DragStart -> {
                 pendingRecenter = null
+                kinematics = StrokeKinematics(scrollTuning().toConfig())
                 val area = findScrollableArea(action.x, action.y, width, height)
                 val start = kinematics.begin(action.x, action.y, area)
                 strokeBegin(start.x * width, start.y * height)
@@ -323,7 +326,17 @@ class StarkAccessibilityService : AccessibilityService() {
      * Si la diffusion est indisponible ou refusée, [streaming] reste faux et l'appelant retombe
      * sur le glisser synthétisé au relâchement, qui reste correct pour déplacer un élément.
      */
-    private val kinematics = StrokeKinematics()
+    /**
+     * Cinématique du tracé, reconstruite au début de chaque geste pour prendre en compte la
+     * vivacité choisie par l'utilisateur.
+     *
+     * Ce service est distinct de celui qui lit les préférences au démarrage, et il ne redémarre pas
+     * quand l'autre le fait : relire au début du geste est donc la seule façon qu'un changement de
+     * réglage prenne effet sans redémarrer le téléphone. La lecture est servie par le cache mémoire
+     * des préférences partagées, donc sans accès disque.
+     */
+    private var kinematics = StrokeKinematics()
+    private var bindingsStore: BindingsStore? = null
 
     /**
      * Repositionnement en attente, en coordonnées écran normalisées.
@@ -470,6 +483,11 @@ class StarkAccessibilityService : AccessibilityService() {
             it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN ||
             it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT ||
             it == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT
+    }
+
+    private fun scrollTuning(): ScrollTuning {
+        val store = bindingsStore ?: BindingsStore(this).also { bindingsStore = it }
+        return runCatching { store.loadScrollTuning() }.getOrDefault(ScrollTuning.DEFAULT)
     }
 
     private fun strokeBegin(x: Float, y: Float) {
@@ -668,20 +686,20 @@ class StarkAccessibilityService : AccessibilityService() {
         fun perform(action: SystemAction): Boolean = perform(action, 1f, 1f)
 
         /**
-         * Cible interactive vers laquelle aimanter un appui, en coordonnées écran normalisées,
-         * ou null s'il n'y en a aucune assez proche — l'appui doit alors partir exactement là où
-         * l'utilisateur a pointé.
+         * Aimantation d'un appui, en coordonnées écran normalisées, ou null s'il n'y a aucune
+         * cible assez proche — l'appui doit alors partir exactement là où l'utilisateur a pointé.
          *
-         * Retourne le rectangle complet et non son seul centre : l'appelant en a besoin pour
-         * *montrer* la cible retenue. Une aimantation invisible se comporterait comme un curseur
-         * qui ment, et détruirait la confiance qu'elle est censée créer.
+         * Retourne le rectangle **et** le point d'application, qui sont distincts : le rectangle
+         * sert à *montrer* ce qui a été touché, le point à l'atteindre. Une aimantation invisible
+         * se comporterait comme un curseur qui ment, et détruirait la confiance qu'elle est censée
+         * créer. Et quand l'appui était déjà dans la cible, le point reste celui de l'utilisateur.
          */
         fun snapTarget(
             xNorm: Float,
             yNorm: Float,
             screenWidth: Float,
             screenHeight: Float
-        ): TargetSnapper.Target? {
+        ): TargetSnapper.Snap? {
             val service = instance ?: return null
             if (screenWidth <= 0f || screenHeight <= 0f) return null
 
@@ -695,11 +713,16 @@ class StarkAccessibilityService : AccessibilityService() {
                 radius = TargetSnapper.defaultRadius(screenWidth, screenHeight)
             ) ?: return null
 
-            return TargetSnapper.Target(
-                left = snapped.left / screenWidth,
-                top = snapped.top / screenHeight,
-                right = snapped.right / screenWidth,
-                bottom = snapped.bottom / screenHeight
+            return TargetSnapper.Snap(
+                target = TargetSnapper.Target(
+                    left = snapped.target.left / screenWidth,
+                    top = snapped.target.top / screenHeight,
+                    right = snapped.target.right / screenWidth,
+                    bottom = snapped.target.bottom / screenHeight
+                ),
+                x = snapped.x / screenWidth,
+                y = snapped.y / screenHeight,
+                moved = snapped.moved
             )
         }
     }

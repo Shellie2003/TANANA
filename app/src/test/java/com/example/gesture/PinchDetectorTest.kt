@@ -181,6 +181,73 @@ class PinchDetectorTest {
         assertEquals(PinchDetector.Rejection.COOLDOWN, d.lastRejection)
     }
 
+    // --- Le blocage par intermittence ---------------------------------------------------------
+
+    /**
+     * **Le défaut que l'utilisateur a signalé.** Le verrou de rejet ne se levait qu'une fois la
+     * main revenue au-dessus de 72 % de sa ligne de base — une valeur absolue. Une main dont la
+     * position de repos tombait sous cette bande ne pouvait donc plus jamais le lever : un seul
+     * rejet, et plus aucun appui ne partait. Le défilement s'arrêtait avec lui, puisqu'il a besoin
+     * du même enfoncement — d'où un clic et un défilement qui « parfois ne marchent pas ».
+     */
+    @Test
+    fun `un rejet ne bloque pas les appuis suivants`() {
+        val d = PinchDetector()
+        var t = settle(d, rest = 0.85f)
+
+        // Une fermeture lente : rejetée, et le verrou se pose.
+        (0..20).forEach { i ->
+            d.update(0.85f - i * 0.035f, 0.5f, 0.5f, t); t += frameMs
+        }
+        assertEquals(PinchDetector.Rejection.TOO_SLOW, d.lastRejection)
+
+        // La main se rouvre **partiellement**, sans jamais revenir grande ouverte, puis pince
+        // franchement. C'est le cas que l'ancienne bande absolue rendait impossible.
+        repeat(6) { d.update(0.55f, 0.5f, 0.5f, t); t += frameMs }
+        val events = play(d, listOf(0.55f, 0.12f, 0.09f, 0.45f, 0.55f), startMs = t)
+        assertEquals("l'appui est resté bloqué par le rejet précédent", 1, events.presses())
+    }
+
+    /**
+     * Changer de posture ne doit pas rendre l'appui inopérant le temps que la référence s'adapte.
+     *
+     * La référence ne descendait qu'à 1,2 % par image, soit près de trois secondes pour rejoindre
+     * une nouvelle position de repos. Pendant ce temps la course mesurée était celle d'une main qui
+     * n'existait plus, et les appuis étaient rejetés comme trop lents.
+     */
+    @Test
+    fun `changer de posture n empeche pas d appuyer`() {
+        val d = PinchDetector()
+        var t = settle(d, rest = 1.20f)
+
+        // La main se repose plus près d'elle-même, sous l'ancienne bande ouverte (0,86).
+        repeat(10) { d.update(0.75f, 0.5f, 0.5f, t); t += frameMs }
+
+        val events = play(d, listOf(0.75f, 0.15f, 0.12f, 0.50f, 0.75f), startMs = t)
+        assertEquals("la nouvelle posture n'a pas été apprise assez vite", 1, events.presses())
+    }
+
+    /**
+     * L'adaptation rapide ne doit **pas** s'appliquer à une fermeture lente : la référence suivrait
+     * le pouce qui se ferme, le seuil de contact reculerait devant lui, et l'appui ne partirait
+     * jamais. C'est la contrainte qui interdisait d'accélérer la descente sans distinguer les deux
+     * cas.
+     */
+    @Test
+    fun `une fermeture lente ne tire pas la reference vers le bas`() {
+        val d = PinchDetector()
+        val t0 = settle(d, rest = 0.90f)
+        val before = d.baseline
+
+        // Descente régulière sur une seconde, interrompue avant le contact.
+        play(d, (0..20).map { 0.90f - it * 0.025f }, startMs = t0)
+
+        assertTrue(
+            "la référence a suivi la fermeture : ${d.baseline} au lieu de $before",
+            d.baseline > before - 0.12f
+        )
+    }
+
     // --- L'adaptation à l'utilisateur ---------------------------------------------------------
 
     @Test

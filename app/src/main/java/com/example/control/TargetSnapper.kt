@@ -21,15 +21,22 @@ import kotlin.math.min
  *
  * ## Les règles, et leur raison
  *
- *  - **Un point à l'intérieur d'une cible ne bouge pas de cible**, mais est ramené à son centre :
- *    un appui près du bord d'un bouton est valide, seulement moins tolérant au tremblement.
+ *  - **Un point déjà à l'intérieur d'une cible ne bouge pas du tout.** Le ramener au centre
+ *    semblait inoffensif, et c'était le principal défaut de précision de l'application : dans un
+ *    champ de texte, le curseur partait toujours au milieu ; sur un curseur de volume, on ne
+ *    pouvait régler que la position médiane ; dans une carte, une image ou une grande vue, on
+ *    visait le centre quoi qu'on fasse. Être dedans, c'est avoir réussi son geste : il n'y a rien
+ *    à corriger, et corriger quand même revient à **perdre volontairement** l'information que
+ *    l'utilisateur venait de fournir.
  *  - **En cas d'imbrication, la plus petite l'emporte.** Les listes Android emboîtent
  *    régulièrement un élément cliquable dans un conteneur lui-même cliquable ; retenir le plus
  *    grand ferait perdre l'élément précis que l'utilisateur visait.
- *  - **Hors de toute cible, la plus proche n'est retenue que dans un rayon donné.** Sans cette
- *    borne, un appui dans une zone volontairement vide serait attiré vers un bouton lointain :
- *    l'aimantation deviendrait un déplacement arbitraire, et l'utilisateur perdrait la capacité
- *    de cliquer là où il n'y a rien — qui sert, entre autres, à fermer les menus.
+ *  - **Hors de toute cible, la plus proche est retenue dans un rayon donné, et l'appui est alors
+ *    ramené à son centre.** C'est le seul cas où déplacer l'appui apporte quelque chose : sans
+ *    cela il tombait à côté et ne faisait rien. Sans la borne de rayon, en revanche, un appui dans
+ *    une zone volontairement vide serait attiré vers un bouton lointain — l'aimantation deviendrait
+ *    un déplacement arbitraire, et l'on perdrait la capacité de cliquer là où il n'y a rien, qui
+ *    sert entre autres à fermer les menus.
  *
  * Toutes les mesures sont dans une unité unique, laissée à l'appelant. Le service travaille en
  * pixels, ce qui rend le rayon isotrope malgré un écran non carré.
@@ -60,25 +67,45 @@ object TargetSnapper {
     }
 
     /**
-     * Cible retenue pour un appui en ([x], [y]), ou null si aucune n'est assez proche — auquel cas
+     * Résultat de l'aimantation : la cible retenue, et le point où l'appui doit réellement partir.
+     *
+     * Les deux sont distincts, et c'est tout l'intérêt : la cible sert à **montrer** ce qui a été
+     * touché, le point à l'atteindre. Quand l'appui était déjà dans la cible, le point est celui
+     * de l'utilisateur, inchangé.
+     */
+    data class Snap(
+        val target: Target,
+        val x: Float,
+        val y: Float,
+        /** Vrai quand l'appui a été déplacé, donc quand l'aimantation a réellement servi. */
+        val moved: Boolean
+    )
+
+    /**
+     * Aimantation d'un appui en ([x], [y]), ou null si aucune cible n'est assez proche — auquel cas
      * l'appui doit partir exactement là où l'utilisateur a pointé.
      *
      * @param radius distance maximale, dans la même unité que les rectangles
      */
-    fun snap(x: Float, y: Float, targets: List<Target>, radius: Float): Target? {
+    fun snap(x: Float, y: Float, targets: List<Target>, radius: Float): Snap? {
         if (targets.isEmpty()) return null
 
         // Une cible qui contient le point l'emporte sur toute cible voisine, quelle que soit la
-        // distance de cette dernière au point : être dedans est une intention non ambiguë.
+        // distance de cette dernière au point : être dedans est une intention non ambiguë. Et
+        // l'appui n'est alors **pas** déplacé — il a déjà atteint ce qu'il visait.
         val containing = targets.filter { it.contains(x, y) }
-        if (containing.isNotEmpty()) return containing.minByOrNull { it.area }
+        if (containing.isNotEmpty()) {
+            val target = containing.minByOrNull { it.area } ?: return null
+            return Snap(target, x, y, moved = false)
+        }
 
         val nearest = targets
             .map { it to it.distanceTo(x, y) }
             .filter { (_, distance) -> distance <= radius }
             .minWithOrNull(compareBy({ it.second }, { it.first.area }))
+            ?.first ?: return null
 
-        return nearest?.first
+        return Snap(nearest, nearest.centerX, nearest.centerY, moved = true)
     }
 
     /**

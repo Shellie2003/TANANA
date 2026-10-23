@@ -1,4 +1,4 @@
-# Assemble NEXUS en une APK installable, signée avec la clé de debug.
+# Assemble l'application en une APK installable, signée avec la clé de debug.
 name: APK installable (signée debug)
 
 on:
@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      RELEASE_APK: nexus-release.apk
+      RELEASE_APK: a-release.apk
 
     steps:
       - name: Récupérer le dépôt
@@ -245,7 +245,7 @@ jobs:
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "NEXUS — builds de test" \
+            --title "A — builds de test" \
             --prerelease \
             --notes-file notes.md
 

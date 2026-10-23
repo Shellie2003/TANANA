@@ -1,5 +1,7 @@
 package com.example.gesture
 
+import kotlin.math.abs
+
 /**
  * Le pincement : **le seul geste de l'application**.
  *
@@ -80,10 +82,36 @@ class PinchDetector(private val config: Config = Config()) {
         val contactMax: Float = 0.34f,
 
         /**
-         * Bande haute : au-dessus de cette fraction de la ligne de base, la main est considérée
-         * franchement ouverte. C'est de là qu'est chronométrée la fermeture.
+         * Progression en deçà de laquelle la main est considérée franchement ouverte : c'est de là
+         * qu'est chronométrée la fermeture.
+         *
+         * Exprimée en fraction de la **course** de l'utilisateur, et non plus de sa ligne de base.
+         * Les deux formulations sont voisines, mais la première est celle dans laquelle tout le
+         * reste du détecteur raisonne, ce qui rend le seuil comparable aux autres.
+         *
+         * La valeur est celle à laquelle correspondait l'ancienne bande absolue (72 % de la ligne
+         * de base) sur une main ordinaire, et c'est voulu : la changer aurait décalé la calibration
+         * de [maxCloseMs] et des trois positions de fermeté, donc rendu les appuis plus difficiles
+         * — exactement l'inverse du but. La correction porte sur le **verrou** et sur la vitesse
+         * d'adaptation, pas sur l'exigence demandée au geste.
          */
-        val openBandFraction: Float = 0.72f,
+        val clockArmProgress: Float = 0.42f,
+
+        /**
+         * Progression en deçà de laquelle la tentative en cours est close et le verrou de rejet
+         * levé.
+         *
+         * **C'est la correction du défaut qui rendait l'appui inopérant par intermittence.** Le
+         * verrou ne se levait qu'une fois la main revenue au-dessus de 72 % de sa ligne de base —
+         * une valeur absolue. Une main dont la position de repos tombait sous cette bande ne
+         * pouvait donc plus jamais lever le verrou : un seul rejet, et plus aucun appui ne partait
+         * tant que la main n'était pas grande ouverte. Le défilement s'arrêtait avec lui, puisqu'il
+         * a besoin du même enfoncement.
+         *
+         * Au-dessus de [nearMissProgress] à dessein : la paire forme une hystérésis, de sorte
+         * qu'une main qui oscille autour du seuil ne produise pas une rafale de rejets.
+         */
+        val rearmProgress: Float = 0.45f,
 
         /**
          * Progression de fermeture au-delà de laquelle une tentative avortée est comptée comme un
@@ -116,11 +144,38 @@ class PinchDetector(private val config: Config = Config()) {
         /** Vitesses de suivi de la ligne de base : montée franche, descente très lente. */
         val baselineRise: Float = 0.10f,
         val baselineFall: Float = 0.012f,
+
+        /**
+         * Vitesse de descente quand la main est **au repos** à une nouvelle position.
+         *
+         * La descente lente est indispensable pendant une fermeture : une référence qui suivrait le
+         * pouce qui se ferme verrait le seuil de contact reculer devant lui, et l'appui ne partirait
+         * jamais. Mais elle rendait l'adaptation à un **changement de posture** beaucoup trop
+         * longue — près de trois secondes, pendant lesquelles la course mesurée était celle d'une
+         * main qui n'existait plus, et les appuis étaient rejetés.
+         *
+         * Les deux besoins sont conciliables parce qu'ils se distinguent : une fermeture descend de
+         * façon soutenue, une main au repos ne descend pas. Voir [isAtRest].
+         */
+        val baselineRestFall: Float = 0.12f,
         val baselineMin: Float = 0.35f,
         val baselineMax: Float = 2.0f,
 
         /** Nombre d'images d'observation avant que la ligne de base soit jugée fiable. */
-        val calibrationFrames: Int = 12
+        val calibrationFrames: Int = 12,
+
+        /**
+         * Déplacement net, sur la fenêtre d'observation, en deçà duquel la main est jugée au repos.
+         *
+         * Un **déplacement net sur plusieurs images**, et non un écart par image : c'est ce qui
+         * distingue le bruit d'une fermeture lente. Le bruit s'annule sur la fenêtre, une fermeture
+         * s'y accumule. Un critère par image ne peut pas les séparer, puisqu'une fermeture lente
+         * avance, image par image, du même ordre que le bruit.
+         */
+        val restNetMovement: Float = 0.05f,
+
+        /** Longueur de la fenêtre d'observation du repos, en images. */
+        val restWindowFrames: Int = 5
     )
 
     /** Ce que la frame courante produit. Deux événements, comme un bouton. */
@@ -181,7 +236,16 @@ class PinchDetector(private val config: Config = Config()) {
     private var contactBaseline = 0f
     private var contactMin = 0f
     private var lastPressAt = Long.MIN_VALUE
+
+    /**
+     * Instant où la main était pour la dernière fois franchement ouverte : origine du chronomètre
+     * de fermeture.
+     */
     private var lastOpenAt = Long.MIN_VALUE
+
+    /** Fenêtre glissante des derniers écarts observés, pour juger du repos. */
+    private val recentRatios = FloatArray(16) { Float.NaN }
+    private var recentIndex = 0
 
     /** Diagnostic du dernier geste mesuré. */
     var lastAmplitude: Float = 0f
@@ -223,6 +287,8 @@ class PinchDetector(private val config: Config = Config()) {
         baseline = Float.NaN
         observedFrames = 0
         lastRejection = Rejection.NONE
+        recentRatios.fill(Float.NaN)
+        recentIndex = 0
     }
 
     /** Remet à zéro les compteurs de session sans perdre la calibration acquise. */
@@ -251,16 +317,19 @@ class PinchDetector(private val config: Config = Config()) {
             return onSustainedContact(pinchRatio, nowMs)
         }
 
-        trackBaseline(pinchRatio)
+        val atRest = isAtRest(pinchRatio)
+        record(pinchRatio)
+        trackBaseline(pinchRatio, atRest)
 
         val contact = contactThreshold
-        val openBand = baseline * config.openBandFraction
         travelProgress = closingProgress(pinchRatio, contact)
         peakProgress = maxOf(peakProgress, travelProgress)
 
-        // Bande haute : la main est franchement ouverte. C'est ici que se clôt la tentative
-        // précédente, et que démarre le chronomètre de la suivante.
-        if (pinchRatio >= openBand) {
+        // Main franchement ouverte : c'est ici que démarre le chronomètre de la fermeture.
+        if (travelProgress <= config.clockArmProgress) lastOpenAt = nowMs
+
+        // Fin de la tentative en cours, sur un seuil **relatif à la course** de l'utilisateur.
+        if (travelProgress < config.rearmProgress) {
             // `!closureJudged` compte. Sans lui, une fermeture déjà jugée — trop lente, ou absorbée
             // par l'anti-rebond — était **recomptée** en quasi-contact au moment où la main se
             // rouvrait : un seul geste produisait deux rejets, et la cause affichée était la
@@ -270,7 +339,6 @@ class PinchDetector(private val config: Config = Config()) {
                 reject(Rejection.TOO_SHALLOW, baseline - (baseline - contact) * peakProgress, 0L)
             }
             endAttempt()
-            lastOpenAt = nowMs
             return Event.NONE
         }
 
@@ -291,10 +359,36 @@ class PinchDetector(private val config: Config = Config()) {
      * s'ouvre ; la descente doit être lente pour qu'une série d'appuis rapprochés ne tire pas la
      * référence vers le bas et ne finisse pas par s'auto-invalider.
      */
-    private fun trackBaseline(ratio: Float) {
-        val rate = if (ratio > baseline) config.baselineRise else config.baselineFall
+    private fun trackBaseline(ratio: Float, atRest: Boolean) {
+        val rate = when {
+            ratio > baseline -> config.baselineRise
+            // Main posée à une nouvelle position : la référence doit l'y rejoindre vite, sans quoi
+            // la course mesurée reste celle d'une posture abandonnée.
+            atRest -> config.baselineRestFall
+            else -> config.baselineFall
+        }
         baseline = (baseline + (ratio - baseline) * rate)
             .coerceIn(config.baselineMin, config.baselineMax)
+    }
+
+    /**
+     * La main est-elle posée, plutôt qu'en train de se fermer ?
+     *
+     * Jugé sur le **déplacement net** depuis quelques images, et non sur l'écart d'une image à la
+     * suivante. C'est la seule façon de séparer le bruit d'une fermeture lente : le bruit s'annule
+     * sur la fenêtre, une fermeture s'y accumule, alors qu'image par image les deux ont la même
+     * amplitude.
+     */
+    private fun isAtRest(ratio: Float): Boolean {
+        val window = config.restWindowFrames.coerceIn(1, recentRatios.size)
+        val oldest = recentRatios[(recentIndex - window + recentRatios.size) % recentRatios.size]
+        if (oldest.isNaN()) return false
+        return abs(ratio - oldest) < config.restNetMovement
+    }
+
+    private fun record(ratio: Float) {
+        recentRatios[recentIndex] = ratio
+        recentIndex = (recentIndex + 1) % recentRatios.size
     }
 
     private fun closingProgress(ratio: Float, contact: Float): Float {

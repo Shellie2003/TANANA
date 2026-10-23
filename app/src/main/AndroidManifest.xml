@@ -51,10 +51,10 @@
             android:theme="@style/Theme.MyApplication">
             <!--
                 Application ordinaire, et non écran d'accueil de remplacement.
-                Les catégories HOME et DEFAULT faisaient de NEXUS un candidat au rôle de
+                Les catégories HOME et DEFAULT faisaient de l'application un candidat au rôle de
                 launcher : Android proposait de le choisir à chaque appui sur le bouton d'accueil,
-                et l'action « Accueil » du contrôle gestuel pouvait revenir sur NEXUS lui-même au
-                lieu de l'écran d'accueil de l'utilisateur. NEXUS est un contrôleur, pas un
+                et l'action « Accueil » du contrôle gestuel pouvait y revenir au
+                lieu de l'écran d'accueil de l'utilisateur. C'est un contrôleur, pas un
                 lanceur ; il ne garde donc que LAUNCHER, qui le fait figurer dans la liste des
                 applications.
             -->

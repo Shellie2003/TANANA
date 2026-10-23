@@ -19,6 +19,6 @@ class AppResourcesTest {
   fun `nom de l application expose par les ressources`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("NEXUS", appName)
+    assertEquals("A", appName)
   }
 }

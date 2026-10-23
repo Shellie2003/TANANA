@@ -107,6 +107,32 @@ défilement, en balayage, en glisser-déposer — exactement comme il le fait d'
 vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
 Android sait déjà quoi faire d'un doigt.
 
+#### L'appui : ce qui le rendait imprécis et intermittent
+
+Deux défauts distincts, tous deux dans le code et non dans le réglage.
+
+**Imprécis** — l'aimantation ramenait l'appui au **centre** de la cible, même lorsque le point était
+déjà dedans. Dans un champ de texte le curseur partait donc toujours au milieu ; sur un réglage de
+volume, seule la position médiane était atteignable ; dans une carte ou une image, on visait le
+centre quoi qu'on fasse. Être dedans, c'est avoir réussi son geste : il n'y a rien à corriger, et
+corriger quand même revient à perdre volontairement l'information que l'utilisateur venait de
+fournir. L'aimantation ne déplace plus l'appui que lorsqu'il tombe **à côté** d'une cible proche —
+le seul cas où elle sert à quelque chose.
+
+**Intermittent** — le verrou qui empêche de juger deux fois la même fermeture ne se levait qu'une
+fois la main revenue au-dessus de 72 % de sa ligne de base, une valeur **absolue**. Une main dont la
+position de repos tombait sous cette bande ne pouvait donc plus jamais le lever : un seul rejet, et
+plus aucun appui ne partait tant que la main n'était pas grande ouverte. Le défilement s'arrêtait
+avec lui, puisqu'il a besoin du même enfoncement. Le seuil est désormais **relatif à la course** de
+l'utilisateur, comme tout le reste du détecteur.
+
+S'y ajoutait une adaptation trop lente : la ligne de base ne descendait qu'à 1,2 % par image, soit
+près de trois secondes pour rejoindre une nouvelle position de repos — pendant lesquelles la course
+mesurée était celle d'une main qui n'existait plus. Elle rejoint maintenant une main **posée** en
+quelques images, tout en refusant toujours de suivre une main qui se **ferme** : les deux cas se
+distinguent au déplacement net sur quelques images, là où un écart par image ne peut pas les
+séparer.
+
 #### Le défilement : pourquoi le doigt est décollé du curseur
 
 Le doigt synthétique a d'abord suivi la **position absolue** du curseur. Trois symptômes en
@@ -132,6 +158,10 @@ balayage franc fait défiler plusieurs pages, puis le contenu continue seul.
 Le doigt part du **centre de la zone défilable**, et non du point pincé : c'est ce qui donne la même
 course dans les quatre directions, là où pincer en bas de l'écran ne laissait presque rien pour
 défiler vers le bas.
+
+La vivacité se règle dans l'écran, en trois positions — « Précis », « Standard », « Rapide » —
+parce que c'est la seule part du geste qui ne s'apprend pas toute seule : elle n'est pas mesurable
+mais préférentielle. Le début du geste reste au rapport 1:1 dans les trois positions.
 
 L'amplification ne s'applique **pas à tout** — amplifier un glisser d'icône ou le curseur d'un
 réglage le rendrait faux. Le mode est choisi par ce qui se trouve sous le doigt, demandé au système
@@ -233,7 +263,7 @@ réellement économisée est affichée dans l'application.
 ## Tests
 
 Les composants de précision, la politique de commande et la régulation de cadence sont couverts
-par 149 tests JVM (exécution en quelques dizaines de
+par 158 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash
@@ -253,7 +283,7 @@ variante installable, publiée dans la release `unsigned-latest` :
 
 | Fichier | Minifiée par R8 | Usage |
 |---|---|---|
-| `nexus-release.apk` | oui | l'artefact installable |
+| `a-release.apk` | oui | l'artefact installable |
 
 Elle est signée avec la clé de debug (`-PstarkDebugSigning=true`) : installable pour tester,
 jamais publiable. Le workflow vérifie au passage que `hand_landmarker.task` est bien présent dans
