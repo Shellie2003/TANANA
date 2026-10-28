@@ -15,6 +15,16 @@ data class PinchTelemetry(
     val isCalibrated: Boolean = false,
     /** Course pouce-index apprise pour cette main, en multiples de paume. */
     val baseline: Float = 0f,
+    /**
+     * Plus faible écart que cette main a réellement produit, en multiples de paume.
+     *
+     * C'est le nombre qui manquait, et son absence a coûté trois tours de réglage. Le seuil de
+     * contact était une fraction de la course **supposée**, et quand le plancher réel de la mesure
+     * se trouvait au-dessus de ce seuil, l'appui était impossible — sans que rien ne permette de
+     * le voir. En l'affichant à côté du seuil, la comparaison devient immédiate : si le plancher
+     * est au-dessus du seuil, ce n'est pas le geste qui est en cause.
+     */
+    val deepest: Float = 0f,
     /** Seuil de contact courant, dérivé de la course. */
     val contactThreshold: Float = 0f,
     /** Progression de la fermeture en cours, 0..1. */
@@ -42,13 +52,15 @@ data class PinchTelemetry(
      */
     val advice: String?
         get() = when (lastRejection) {
+            // Formulé sur la **mesure**, et plus sur une faute supposée. La version précédente
+            // affirmait « votre pouce s'approche sans toucher l'index » : elle était adressée, dans
+            // le cas le plus fréquent, à quelqu'un dont les doigts se touchaient parfaitement et
+            // dont le seuil était simplement hors d'atteinte. Un conseil faux est pire qu'aucun
+            // conseil, parce qu'il envoie corriger un geste qui était correct.
             PinchDetector.Rejection.TOO_SHALLOW ->
-                "Votre pouce s'approche sans toucher l'index. Laissez-les se rejoindre " +
-                    "franchement : le contact est ce qui déclenche l'appui, et il se sent au doigt."
-
-            PinchDetector.Rejection.TOO_SLOW ->
-                "Le mouvement est trop lent pour être distingué d'un repositionnement de la " +
-                    "main. Frappez d'un coup sec plutôt que de refermer progressivement."
+                "La fermeture s'est arrêtée avant le seuil. Si vos doigts se touchaient bel et " +
+                    "bien, la course sera apprise à l'essai suivant : réessayez une ou deux fois, " +
+                    "ou choisissez la fermeté « Souple »."
 
             PinchDetector.Rejection.COOLDOWN ->
                 "Deux appuis très rapprochés ont été détectés ; le second a été ignoré."
@@ -60,6 +72,7 @@ data class PinchTelemetry(
         fun of(detector: PinchDetector) = PinchTelemetry(
             isCalibrated = detector.isCalibrated,
             baseline = detector.baseline.takeIf { !it.isNaN() } ?: 0f,
+            deepest = detector.deepest.takeIf { !it.isNaN() } ?: 0f,
             contactThreshold = detector.contactThreshold,
             progress = detector.travelProgress,
             presses = detector.pressCount,

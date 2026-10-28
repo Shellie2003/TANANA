@@ -476,6 +476,26 @@ private fun PinchCard(
                 Metric("Course", "%.2f".format(click.baseline), Modifier.weight(1f))
             }
 
+            // Les trois nombres qui disent si le geste peut aboutir, et dont l'absence a coûté
+            // trois tours de réglage à l'aveugle. « Atteint » est le plus faible écart que cette
+            // main a réellement produit ; « Seuil » celui qu'il faut franchir. Si le premier reste
+            // au-dessus du second, aucun pincement ne peut déclencher d'appui — et ce n'est alors
+            // pas le geste qu'il faut corriger.
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Metric(
+                    "Atteint",
+                    click.deepest.takeIf { it > 0f }?.let { "%.2f".format(it) } ?: "—",
+                    Modifier.weight(1f)
+                )
+                Metric("Seuil", "%.2f".format(click.contactThreshold), Modifier.weight(1f))
+                Metric(
+                    "Fermeture",
+                    "${(click.progress * 100).toInt()} %",
+                    Modifier.weight(1f)
+                )
+            }
+
             val advice = click.advice
             if (advice != null) {
                 Spacer(Modifier.height(12.dp))

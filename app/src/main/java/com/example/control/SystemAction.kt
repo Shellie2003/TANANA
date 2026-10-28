@@ -23,6 +23,19 @@ sealed interface SystemAction {
     data class LongPress(val x: Float, val y: Float) : SystemAction
 
     /**
+     * Un pas de défilement, demandé au nœud défilable sous le point visé.
+     *
+     * Distinct d'un tracé, et volontairement : aucune trajectoire n'est transmise, donc le bruit de
+     * suivi de la main ne peut rien perturber, et le pas est celui que l'application a choisi pour
+     * son propre contenu. Voir [com.example.control.EdgeScroller].
+     */
+    data class ScrollStep(
+        val x: Float,
+        val y: Float,
+        val direction: EdgeScroller.Direction
+    ) : SystemAction
+
+    /**
      * Début d'un tracé continu.
      *
      * [x] et [y] sont le point d'application — là où le doigt se pose. [driveX] et [driveY] sont le

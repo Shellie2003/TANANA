@@ -12,6 +12,7 @@ import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.control.BindingsStore
+import com.example.control.EdgeScroller
 import com.example.control.ScrollTuning
 import com.example.control.StrokeKinematics
 import com.example.control.SystemAction
@@ -79,6 +80,9 @@ class StarkAccessibilityService : AccessibilityService() {
                 val start = kinematics.begin(action.x, action.y, area, action.driveX, action.driveY)
                 strokeBegin(start.x * width, start.y * height)
             }
+
+            is SystemAction.ScrollStep ->
+                scrollStep(action.x, action.y, action.direction, width, height)
 
             is SystemAction.DragMove ->
                 advanceStroke(action.x, action.y, action.driveX, action.driveY, width, height)
@@ -509,6 +513,103 @@ class StarkAccessibilityService : AccessibilityService() {
         }
 
         return best?.takeIf { it.horizontal || it.vertical }
+    }
+
+    /**
+     * Le nœud défilable le plus imbriqué contenant le point visé.
+     *
+     * Même parcours élagué que [findScrollableArea], mais sans la contrainte de taille minimale :
+     * celle-ci existe pour qu'un tracé synthétique ait de la course, et un pas de défilement n'a
+     * besoin d'aucune course — il s'adresse directement au nœud. Une petite liste imbriquée est
+     * donc défilable par les bords alors qu'elle ne l'était pas au pincement.
+     */
+    private fun findScrollableNode(
+        xNorm: Float,
+        yNorm: Float,
+        width: Float,
+        height: Float
+    ): AccessibilityNodeInfo? {
+        if (width <= 0f || height <= 0f) return null
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return null
+
+        val x = xNorm * width
+        val y = yNorm * height
+        val bounds = android.graphics.Rect()
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.addLast(root to 0)
+        var visited = 0
+        var best: AccessibilityNodeInfo? = null
+
+        while (queue.isNotEmpty() && visited < MAX_NODES) {
+            val (node, depth) = queue.removeFirst()
+            visited++
+
+            node.getBoundsInScreen(bounds)
+            val containsPoint =
+                x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom
+            if (!containsPoint) continue
+
+            if (node.isScrollable && node.isVisibleToUser) best = node
+
+            if (depth < MAX_DEPTH) {
+                for (i in 0 until node.childCount) {
+                    val child = runCatching { node.getChild(i) }.getOrNull() ?: continue
+                    queue.addLast(child to depth + 1)
+                }
+            }
+        }
+
+        return best
+    }
+
+    /**
+     * Demande un pas de défilement au nœud défilable sous le point visé.
+     *
+     * Rien n'est synthétisé : on appelle l'action que le nœud déclare. C'est ce qui rend ce chemin
+     * insensible au bruit de suivi — aucune trajectoire n'est transmise — et cohérent avec le
+     * contenu, puisque le pas est celui que l'application a choisi pour elle-même.
+     *
+     * Les actions directionnelles (`ACTION_SCROLL_UP` et compagnie) n'existent qu'à partir
+     * d'Android 7.1. En dessous, `ACTION_SCROLL_FORWARD` et `ACTION_SCROLL_BACKWARD` prennent le
+     * relais : elles ne savent pas l'axe, mais le nœud, lui, le sait — c'est son orientation
+     * propre qui décide, et elle est presque toujours celle qu'on attend.
+     */
+    private fun scrollStep(
+        x: Float,
+        y: Float,
+        direction: EdgeScroller.Direction,
+        width: Float,
+        height: Float
+    ) {
+        val node = findScrollableNode(x, y, width, height) ?: return
+        val directional = when (direction) {
+            EdgeScroller.Direction.UP ->
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP
+            EdgeScroller.Direction.DOWN ->
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN
+            EdgeScroller.Direction.LEFT ->
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT
+            EdgeScroller.Direction.RIGHT ->
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT
+        }
+
+        val actions = runCatching { node.actionList }.getOrNull().orEmpty()
+        val performed = if (directional in actions) {
+            runCatching { node.performAction(directional.id) }.getOrDefault(false)
+        } else {
+            false
+        }
+        if (performed) return
+
+        // Repli sur les actions sans axe. « Avant » signifie vers le bas ou vers la droite, ce qui
+        // correspond au sens de lecture : c'est la convention d'Android, pas un choix d'ici.
+        val fallback = when (direction) {
+            EdgeScroller.Direction.DOWN, EdgeScroller.Direction.RIGHT ->
+                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            EdgeScroller.Direction.UP, EdgeScroller.Direction.LEFT ->
+                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        }
+        runCatching { node.performAction(fallback) }
     }
 
     private fun scrollsVertically(node: AccessibilityNodeInfo, w: Float, h: Float): Boolean {

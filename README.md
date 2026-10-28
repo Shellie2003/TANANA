@@ -97,15 +97,94 @@ et sans conséquence ici : ce défaut n'existe que s'il y a autre chose à confo
 | pincer et relâcher sans bouger | **appui** — le clic |
 | pincer et rester immobile | **appui long** — menus contextuels, sélection de texte |
 | pincer et déplacer la main | **tracé continu** — défilement, balayage, glisser-déposer |
+| viser et ne plus bouger | **appui**, sans pincer du tout |
+| poser le curseur contre un bord | **défilement continu**, sans pincer du tout |
 | amener le curseur au bord droit | **panneau de commandes** |
 
 C'est exactement une souris à un bouton, et c'est voulu : personne n'a à apprendre une souris.
+
+Les deux lignes « sans pincer du tout » ne sont pas des gestes de plus : ce sont des **seconds
+chemins vers des actions qui existent déjà**, et il n'y a rien à y apprendre puisque c'est
+l'immobilité qui les déclenche. Elles existent parce que tout ce qui passe par l'articulation des
+doigts hérite de la fiabilité avec laquelle la caméra voit ces doigts — et cette fiabilité a fait
+défaut longuement, pour une raison qui n'était pas un réglage. Voir
+[Le clic était impossible, pas mal réglé](#le-clic-était-impossible-pas-mal-réglé).
 
 Le tracé porte à lui seul ce que six poses portaient avant, et mérite une remarque : rien n'est
 reconnu. On ouvre un tracé, il suit la main, et **c'est le système qui l'interprète** — en
 défilement, en balayage, en glisser-déposer — exactement comme il le fait d'un doigt posé sur la
 vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
 Android sait déjà quoi faire d'un doigt.
+
+#### Le clic était impossible, pas mal réglé
+
+Le pincement a été réglé trois fois sans effet sur l'appareil. Le quatrième tour n'a pas cherché un
+seuil mal placé mais une **impossibilité**, et il en a trouvé une.
+
+Le seuil de contact était une fraction de l'écart au repos : 34 % de la course. Cela suppose de
+savoir jusqu'où descend un pincement, et la supposition était fausse. Quand le pouce touche
+l'index, les deux extrémités **se confondent dans l'image**, et le modèle de points de repère cesse
+de les rapprocher : il conserve entre elles une distance plancher, non nulle, qui dépend de la main,
+de l'angle et de la caméra. Mesuré en harnais, pour une course au repos de 0,75, le seuil tombait à
+**0,255** — tout plancher réel à 0,25 ou au-dessus, valeur ordinaire, rendait l'appui inatteignable.
+Aucun soin mis à pincer n'y changeait rien. Et l'application affichait alors « votre pouce
+s'approche sans toucher l'index » à quelqu'un dont les doigts se touchaient parfaitement.
+
+Le seuil dérive désormais de l'intervalle entre la course au repos et **le plus faible écart que
+cette main a réellement produit**. Il ne peut donc plus être hors d'atteinte, puisqu'il est défini
+par rapport à ce qui a été atteint. Une tentative qui échoue enseigne tout de même le plancher : la
+calibration se fait en un ou deux essais au lieu de jamais.
+
+| plancher réel de la mesure | avant | après |
+|---|---|---|
+| 0,20 | aboutit | aboutit |
+| 0,25 à 0,40 | **jamais** | aboutit au 1er essai |
+| 0,45 à 0,50 | **jamais** | aboutit au 2e essai |
+
+Et aucune fermeture partielle jusqu'à 64 % de la course ne déclenche d'appui, main au repos comprise.
+
+Apprendre le plancher demande une précaution qui n'est pas évidente. Il doit pouvoir **monter**,
+sinon une main dont la mesure ne descend jamais sous 0,50 garderait un seuil hors d'atteinte. Mais
+s'il monte librement, une fermeture délibérément partielle lui enseigne un plancher faussement haut,
+le seuil se relâche d'autant, et une main à peine refermée déclenche un appui — des tests ont pris ce
+second défaut en flagrant délit. Les deux cas sont indiscernables sur une image et se séparent sur
+leur **persistance** : une butée de la mesure est tenue, un arrêt choisi est transitoire. Le plancher
+ne monte donc que vers une valeur tenue plusieurs images.
+
+Un second critère est tombé au passage : la fermeture devait durer moins de 240 ms. Le critère est
+juste sur le geste — une impulsion volontaire est brève, un repositionnement de main est lent — et
+intenable sur la mesure, parce qu'il est exprimé en millisecondes mais évalué en images, et que la
+cadence réelle de la chaîne caméra-inférence sur un téléphone est de 12 à 20 images par seconde, non
+30. Une fermeture volontaire mais posée de 300 ms était rejetée à **toute** cadence inférieure à 30.
+Il ne discriminait d'ailleurs rien que la profondeur ne discrimine déjà : replacer sa main n'amène
+pas le pouce sur l'index.
+
+Le réglage de fermeté porte donc maintenant sur la **profondeur** exigée, qui ne dépend d'aucune
+horloge, et non plus sur la vivacité.
+
+#### La leçon, et les deux chemins qu'elle a ouverts
+
+Le correctif ci-dessus traite une cause précise. Mais la leçon dépasse la cause : **tout appui
+obtenu par l'articulation des doigts hérite de la fiabilité avec laquelle la caméra voit ces
+doigts**, et rien ne garantit cette fiabilité. Une position, elle, est la grandeur la mieux mesurée
+de toute la chaîne — celle qui marchait déjà quand rien d'autre ne marchait.
+
+D'où deux chemins qui ne demandent aucune articulation :
+
+- **Le clic par maintien.** Viser et ne plus bouger déclenche l'appui. C'est le mécanisme de tous
+  les suivis oculaires et céphaliques, pour cette raison exactement. Il faut avoir **quitté** le
+  dernier point cliqué pour en viser un autre, ce qui rend la rafale impossible ; l'anneau du
+  curseur montre le compte à rebours, donc bouger l'annule.
+- **Le défilement par les bords.** Poser le curseur contre un bord y fait défiler en continu,
+  d'autant plus vite qu'on s'en approche. Il passe par les actions d'accessibilité du nœud
+  défilable, et non par un doigt synthétisé : aucune trajectoire n'est transmise, donc le bruit de
+  suivi ne peut rien perturber, et le pas est celui que l'application a choisi pour son contenu. Un
+  délai d'amorçage de 320 ms sépare « se poser dans la bande » de « la traverser », et le bord droit
+  reste au panneau de commandes.
+
+Ni l'un ni l'autre ne remplace le pincement, plus rapide et plus intentionnel, ni le défilement au
+tracé, seul à être fluide et à amplitude libre. Ils garantissent que l'appareil reste utilisable
+quand le geste ne part pas, et que parcourir un article long ne coûte pas dix pincements tenus.
 
 #### La précision du curseur : ce que la mesure a contredit
 

@@ -59,9 +59,11 @@ import kotlin.math.hypot
  *  - **Ligne de base adaptative** ([baseline]) — un suiveur de crête asymétrique apprend l'écart
  *    au repos. Il monte vite, ne descend que lentement, et **se fige pendant le contact** : un
  *    appui maintenu ne peut donc pas éroder sa propre référence.
- *  - **Seuil de contact proportionnel** — une fraction de cette course, et non une constante.
- *  - **Fenêtre de fermeture** mesurée depuis la bande ouverte : c'est ce qui sépare une impulsion
- *    volontaire d'un repositionnement de la main.
+ *  - **Seuil de contact dérivé de la course mesurée** — pas une fraction de la ligne de base, mais
+ *    une fraction de l'intervalle entre celle-ci et le plus faible écart que cette main a
+ *    réellement produit ([deepest]). La nuance est tout : une fraction de la ligne de base suppose
+ *    de savoir jusqu'où descend un pincement, et quand cette supposition est trop optimiste le
+ *    seuil est **hors d'atteinte**, donc l'appui impossible. Voir [Config.contactFraction].
  *  - **Relâchement anticipé** — le bouton remonte dès que le pouce est reparti d'une fraction du
  *    chemin, sans attendre l'ouverture complète. Quelques dizaines de millisecondes gagnées à
  *    chaque appui, sans rien concéder.
@@ -75,12 +77,97 @@ class PinchDetector(private val config: Config = Config()) {
 
     data class Config(
         /**
-         * Fraction de la ligne de base sous laquelle le contact est déclaré. Bornée : une course
-         * de référence aberrante ne doit pas rendre l'appui impossible ni trivial.
+         * Fraction de la **course mesurée** au-dessus du plancher atteint, à laquelle le contact
+         * est déclaré.
+         *
+         * ## Pourquoi la course mesurée, et non la ligne de base
+         *
+         * C'est la correction du défaut qui rendait l'appui **impossible**, et non difficile.
+         *
+         * Le seuil était une fraction de la seule ligne de base : 34 % de l'écart au repos. Cela
+         * suppose de savoir jusqu'où descend un pincement, et cette supposition était fausse.
+         * Quand le pouce touche l'index, les deux extrémités se confondent dans l'image, et le
+         * modèle de points de repère **cesse de les rapprocher** : il conserve entre elles une
+         * distance plancher, qui n'est pas nulle et qui dépend de la main, de l'angle et de la
+         * caméra. Mesuré en harnais, pour une course au repos de 0,75, le seuil tombait à 0,255 :
+         * tout plancher à 0,25 ou au-dessus — valeur ordinaire — rendait l'appui inatteignable.
+         * Aucun soin mis à pincer n'y changeait rien, et le détecteur annonçait alors un pouce
+         * « qui s'approche sans toucher » à quelqu'un dont les doigts se touchaient.
+         *
+         * Le seuil est désormais une fraction de l'intervalle entre la ligne de base et le
+         * **plus faible écart que cette main a réellement produit** ([deepest]). Il ne peut donc
+         * plus être hors d'atteinte : il est défini par rapport à ce qui a été atteint. Une
+         * tentative qui échoue enseigne tout de même le plancher, si bien que la calibration se
+         * fait en un ou deux essais au lieu de jamais.
          */
-        val contactFraction: Float = 0.34f,
-        val contactMin: Float = 0.12f,
-        val contactMax: Float = 0.34f,
+        val contactFraction: Float = 0.25f,
+
+        /**
+         * Plancher supposé, en fraction de la ligne de base, avant tout pincement observé.
+         *
+         * Il faut bien une valeur pour le premier geste, et elle est choisie **prudente**, c'est-à-
+         * dire en supposant une course profonde. Une valeur pessimiste a été essayée et mesurée :
+         * elle fait aboutir du premier coup les planchers jusqu'à 0,42, mais elle place le seuil si
+         * haut qu'une fermeture **partielle** déclenche aussi — des tests l'ont montré sur une main
+         * à grande course. Sur un outil qui agit sur le téléphone entier, un appui parti tout seul
+         * est bien plus coûteux qu'un appui manqué, et le maintien
+         * ([com.example.control.Pointer.Config.dwellEnabled]) garantit de toute façon qu'un appui
+         * reste atteignable.
+         *
+         * Le prix de la prudence est borné à **un geste** : une main dont le plancher est haut voit
+         * son premier pincement ne pas aboutir, mais ce pincement enseigne la course, et tous les
+         * suivants aboutissent. Mesuré en harnais, aucun plancher de 0,10 à 0,50 ne résiste au
+         * second essai.
+         */
+        val deepestBootstrap: Float = 0.30f,
+
+        /**
+         * Garde-fou : le contact ne peut jamais être déclaré au-dessus de cette fraction de la
+         * ligne de base.
+         *
+         * Protège le cas dégénéré où la main n'aurait presque pas de course — plancher mesuré
+         * tout près du repos, par exemple si le suivi est mauvais. Sans cette borne, l'intervalle
+         * devient minuscule et le moindre frémissement déclencherait un appui.
+         */
+        val maxContactFraction: Float = 0.70f,
+
+        /**
+         * Vitesse à laquelle le plancher appris **remonte** vers la ligne de base, par image, quand
+         * la main est ouverte et au repos.
+         *
+         * Une seule image de suivi aberrante peut rapporter un écart absurdement faible, et elle
+         * abaisserait définitivement la barre. La remontée lente guérit ce cas sans défaire
+         * l'apprentissage : un plancher réellement atteint est reconfirmé à chaque pincement, bien
+         * plus vite qu'il ne remonte.
+         */
+        val deepestHeal: Float = 0.004f,
+
+        /**
+         * Images consécutives sans progrès vers le bas au terme desquelles l'écart observé est
+         * tenu pour une **butée**, et non pour un arrêt choisi.
+         *
+         * ## Ce que ce compte départage, et pourquoi il faut le départager
+         *
+         * Le plancher appris doit pouvoir **monter**, sans quoi une main dont la mesure ne descend
+         * jamais sous 0,50 garderait un seuil hors d'atteinte — le défaut d'origine. Mais s'il monte
+         * librement, une fermeture délibérément partielle lui enseigne un plancher faussement haut,
+         * le seuil se relâche d'autant, et une main à peine refermée déclenche un appui. Des tests
+         * ont pris ce second défaut en flagrant délit.
+         *
+         * Les deux cas sont indiscernables sur une image et se séparent sur leur **persistance**.
+         * Une butée de la mesure est tenue : le pouce est pressé contre l'index, il y reste, et le
+         * nombre refuse de descendre. Un arrêt choisi est transitoire — on s'arrête puis on repart,
+         * dans un sens ou dans l'autre. Le plancher ne peut donc monter que vers une valeur tenue
+         * plusieurs images ; sinon il ne peut que descendre, c'est-à-dire n'apprendre que ce qu'une
+         * main a prouvé pouvoir faire.
+         */
+        val plateauFrames: Int = 4,
+
+        /**
+         * Progrès vers le bas, d'une image à l'autre, en deçà duquel la fermeture est tenue pour
+         * arrêtée. Au-dessus du bruit de mesure, en dessous de la vitesse d'une fermeture en cours.
+         */
+        val plateauBand: Float = 0.010f,
 
         /**
          * Progression en deçà de laquelle la main est considérée franchement ouverte : c'est de là
@@ -120,13 +207,6 @@ class PinchDetector(private val config: Config = Config()) {
          * de son point de vue, il a pincé.
          */
         val nearMissProgress: Float = 0.55f,
-
-        /**
-         * Durée maximale de la fermeture, mesurée depuis la sortie de la bande ouverte. Une
-         * impulsion volontaire dure environ 100 ms ; un repositionnement de la main, plusieurs
-         * centaines. C'est le critère qui sépare l'intention du mouvement parasite.
-         */
-        val maxCloseMs: Long = 240L,
 
         /**
          * Fraction du chemin de retour au-delà de laquelle le relâchement est acquis. À 0,5 le
@@ -232,9 +312,6 @@ class PinchDetector(private val config: Config = Config()) {
          */
         TOO_SHALLOW,
 
-        /** La fermeture a pris trop de temps : repositionnement de la main, pas une impulsion. */
-        TOO_SLOW,
-
         /** Deux enfoncements trop rapprochés : le second est un rebond du suivi. */
         COOLDOWN
     }
@@ -250,10 +327,33 @@ class PinchDetector(private val config: Config = Config()) {
     /** Vrai quand la ligne de base a été observée assez longtemps pour être fiable. */
     val isCalibrated: Boolean get() = observedFrames >= config.calibrationFrames
 
-    /** Seuil de contact courant, dérivé de la ligne de base. */
+    /**
+     * Plus faible écart pouce-index que cette main a réellement produit.
+     *
+     * C'est la grandeur qui manquait. Elle est **figée pendant une fermeture** : si elle suivait
+     * l'écart courant, le seuil — défini au-dessus d'elle — reculerait devant le doigt et le
+     * contact ne serait jamais déclaré. Une tentative accumule donc son minimum à part, et ne le
+     * verse ici qu'à la fin, qu'elle ait abouti ou non. Voir [attemptMin].
+     */
+    var deepest: Float = Float.NaN
+        private set
+
+    /** Minimum de la tentative en cours, versé dans [deepest] quand elle se termine. */
+    private var attemptMin: Float = Float.NaN
+
+    /** Images consécutives sans progrès vers le bas : signature d'une butée. */
+    private var plateauFrames = 0
+
+    /** Seuil de contact courant, dérivé de la course réellement mesurée. */
     val contactThreshold: Float
-        get() = if (baseline.isNaN()) config.contactMax
-        else (baseline * config.contactFraction).coerceIn(config.contactMin, config.contactMax)
+        get() {
+            if (baseline.isNaN()) return 0f
+            val floor = if (deepest.isNaN()) baseline * config.deepestBootstrap else deepest
+            val span = baseline - floor
+            val ceiling = baseline * config.maxContactFraction
+            if (span <= 1e-3f) return (baseline * config.deepestBootstrap).coerceAtMost(ceiling)
+            return (floor + span * config.contactFraction).coerceAtMost(ceiling)
+        }
 
     // --- État du bouton -----------------------------------------------------------------------
 
@@ -334,6 +434,9 @@ class PinchDetector(private val config: Config = Config()) {
         travelProgress = 0f
         lastOpenAt = Long.MIN_VALUE
         baseline = Float.NaN
+        deepest = Float.NaN
+        attemptMin = Float.NaN
+        plateauFrames = 0
         observedFrames = 0
         lastRejection = Rejection.NONE
         recentRatios.fill(Float.NaN)
@@ -373,6 +476,7 @@ class PinchDetector(private val config: Config = Config()) {
         val atRest = isAtRest(pinchRatio)
         record(pinchRatio)
         trackBaseline(pinchRatio, atRest)
+        noteDepth(pinchRatio, atRest)
 
         val contact = contactThreshold
         travelProgress = closingProgress(pinchRatio, contact)
@@ -402,9 +506,72 @@ class PinchDetector(private val config: Config = Config()) {
     }
 
     private fun endAttempt() {
+        commitDepth()
         attemptPending = false
         closureJudged = false
         peakProgress = 0f
+    }
+
+    /**
+     * Accumule le minimum de la tentative en cours, et laisse le plancher appris remonter quand la
+     * main est ouverte et posée.
+     *
+     * La séparation entre les deux est ce qui fait fonctionner l'ensemble. Pendant une fermeture,
+     * le plancher ne doit pas bouger, sous peine de voir le seuil fuir devant le doigt. Mais hors
+     * fermeture il doit pouvoir remonter, pour qu'une image aberrante ne laisse pas une barre
+     * durablement trop basse.
+     */
+    private fun noteDepth(ratio: Float, atRest: Boolean) {
+        if (attemptPending) {
+            observeDepth(ratio)
+            return
+        }
+        if (deepest.isNaN()) return
+        if (!atRest) return
+        deepest = (deepest + (baseline - deepest) * config.deepestHeal).coerceAtMost(baseline)
+    }
+
+    /**
+     * Suit le minimum de la tentative et compte les images sans progrès vers le bas.
+     *
+     * Le compte est ce qui permettra de dire, à la fin, si l'écart observé est une butée tenue ou
+     * un arrêt passager. Voir [Config.plateauFrames].
+     */
+    private fun observeDepth(ratio: Float) {
+        if (attemptMin.isNaN()) {
+            attemptMin = ratio
+            plateauFrames = 0
+            return
+        }
+        if (ratio < attemptMin - config.plateauBand) {
+            // La fermeture progresse encore : rien n'est tenu.
+            attemptMin = ratio
+            plateauFrames = 0
+            return
+        }
+        attemptMin = minOf(attemptMin, ratio)
+        plateauFrames++
+    }
+
+    /**
+     * Verse le minimum de la tentative dans le plancher appris.
+     *
+     * Appelé que la tentative ait abouti ou échoué, et c'est le point : **un échec enseigne autant
+     * qu'une réussite**. Un pincement franc qui n'a pas déclenché l'appui a tout de même prouvé
+     * jusqu'où cette main descend, donc où placer le seuil pour que le suivant aboutisse.
+     */
+    private fun commitDepth() {
+        val observed = attemptMin
+        val held = plateauFrames >= config.plateauFrames
+        attemptMin = Float.NaN
+        plateauFrames = 0
+        if (observed.isNaN()) return
+
+        val current = if (deepest.isNaN()) baseline * config.deepestBootstrap else deepest
+        // Une butée tenue redéfinit le plancher, vers le haut comme vers le bas : c'est la seule
+        // mesure de ce que cette main et cette caméra peuvent produire. Un arrêt passager, lui, ne
+        // peut que l'abaisser — il prouve une capacité, il ne prouve aucune limite.
+        deepest = if (held) observed else minOf(current, observed)
     }
 
     /**
@@ -492,16 +659,21 @@ class PinchDetector(private val config: Config = Config()) {
     }
 
     /**
-     * Franchissement du seuil de contact. C'est ici, et seulement ici, que l'intention est jugée :
-     * il ne reste que deux critères, la vitesse de la descente et l'anti-rebond.
+     * Franchissement du seuil de contact. C'est ici, et seulement ici, que l'intention est jugée,
+     * et il ne reste qu'**un** critère : l'anti-rebond.
+     *
+     * La fermeture était aussi soumise à un budget de temps — 240 ms depuis la bande ouverte — au
+     * motif qu'une impulsion volontaire est brève et qu'un repositionnement de main est lent.
+     * C'est vrai du geste, et pourtant le critère était intenable : il est mesuré en images, et la
+     * cadence réelle de la chaîne caméra-inférence sur un téléphone est de 12 à 20 images par
+     * seconde, non 30. Mesuré en harnais, une fermeture volontaire mais posée de 300 ms était
+     * rejetée à **toute** cadence inférieure à 30. Le critère ne discriminait d'ailleurs rien que
+     * la profondeur ne discrimine déjà : un repositionnement de la main n'amène pas le pouce sur
+     * l'index. Il a donc été retiré, et la durée n'est plus que du diagnostic.
      */
     private fun onContact(ratio: Float, cursorX: Float, cursorY: Float, nowMs: Long): Event {
         val amplitude = baseline - ratio
-        val duration = if (lastOpenAt == Long.MIN_VALUE) Long.MAX_VALUE else nowMs - lastOpenAt
-        if (duration > config.maxCloseMs) {
-            reject(Rejection.TOO_SLOW, amplitude, duration)
-            return Event.NONE
-        }
+        val duration = if (lastOpenAt == Long.MIN_VALUE) 0L else nowMs - lastOpenAt
         if (lastPressAt != Long.MIN_VALUE && nowMs - lastPressAt < config.cooldownMs) {
             reject(Rejection.COOLDOWN, amplitude, duration)
             return Event.NONE
@@ -527,6 +699,9 @@ class PinchDetector(private val config: Config = Config()) {
     /** Contact établi : il ne reste qu'à guetter le relâchement. */
     private fun onSustainedContact(ratio: Float, nowMs: Long): Event {
         if (ratio < contactMin) contactMin = ratio
+        // Le contact établi est le meilleur moment pour mesurer le plancher : le pouce est posé,
+        // donc l'écart observé est exactement celui que cette main peut produire, et il est tenu.
+        observeDepth(ratio)
 
         // Relâchement anticipé : une fraction du chemin de retour suffit. Attendre l'ouverture
         // complète n'apporte aucune certitude supplémentaire et ne fait que retarder le geste.

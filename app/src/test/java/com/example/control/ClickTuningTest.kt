@@ -15,20 +15,25 @@ class ClickTuningTest {
 
     private val frameMs = 33L
 
-    /** Joue une fermeture de vitesse donnée et dit si elle enfonce le bouton. */
-    private fun pressesWith(tuning: ClickTuning, closingFrames: Int): Boolean {
+    /**
+     * Joue une fermeture s'arrêtant à une profondeur donnée et dit si elle enfonce le bouton.
+     *
+     * Le réglage portait auparavant sur la **vitesse** de la fermeture, et ce test mesurait des
+     * durées. Le critère de vitesse a été retiré : exprimé en millisecondes mais évalué en images,
+     * il dépendait de la cadence réelle de la caméra, qui tombe à 12-20 images par seconde sur un
+     * téléphone, et rejetait alors les gestes volontaires mais posés. Ce qui se règle désormais est
+     * la profondeur exigée, qui ne dépend d'aucune horloge.
+     */
+    private fun pressesWith(tuning: ClickTuning, floor: Float): Boolean {
         val d = PinchDetector(tuning.toConfig())
         var t = 0L
         repeat(40) { d.update(0.85f, 0.5f, 0.5f, t); t += frameMs }
 
         var pressed = false
-        // Descente régulière de 0,85 jusqu'au contact, en `closingFrames` images.
-        for (i in 1..closingFrames) {
-            val ratio = 0.85f - (0.75f * i / closingFrames)
-            if (d.update(ratio, 0.5f, 0.5f, t) == PinchDetector.Event.PRESS) pressed = true
-            t += frameMs
-        }
-        listOf(0.50f, 0.85f, 0.85f).forEach { ratio ->
+        val trace = (1..8).map { 0.85f - (0.85f - floor) * it / 8f } +
+            List(6) { floor } +
+            List(4) { 0.85f }
+        trace.forEach { ratio ->
             if (d.update(ratio, 0.5f, 0.5f, t) == PinchDetector.Event.PRESS) pressed = true
             t += frameMs
         }
@@ -36,33 +41,35 @@ class ClickTuningTest {
     }
 
     @Test
-    fun `un geste vif est accepte par les trois reglages`() {
+    fun `un contact franc est accepte par les trois reglages`() {
         ClickTuning.entries.forEach { tuning ->
-            assertTrue("$tuning refuse un geste vif", pressesWith(tuning, closingFrames = 6))
+            assertTrue("$tuning refuse un contact franc", pressesWith(tuning, floor = 0.10f))
         }
     }
 
     /**
-     * Les trois réglages doivent se séparer sur des vitesses réelles, pas seulement dans leurs
-     * constantes. Les points ci-dessous ont été mesurés sur la trajectoire ci-dessus.
-     *
-     * Noter que la durée jugée n'est pas celle de toute la descente mais celle de sa part sous la
-     * bande ouverte : le début du mouvement, où la main n'a encore rien engagé, n'est pas compté.
+     * Les trois réglages doivent se séparer sur des profondeurs réelles, pas seulement dans leurs
+     * constantes. Les points ci-dessous sont mesurés sur une course au repos de 0,85 et le plancher
+     * supposé du premier geste.
      */
     @Test
-    fun `chaque cran supplementaire rejette les gestes plus lents`() {
-        // Fermeture posée : « Vif » décroche, les deux autres passent encore.
-        assertTrue(pressesWith(ClickTuning.RELAXED, 14))
-        assertTrue(pressesWith(ClickTuning.STANDARD, 14))
-        assertTrue("« Vif » doit refuser une fermeture posée", !pressesWith(ClickTuning.BRISK, 14))
+    fun `chaque cran supplementaire exige une fermeture plus profonde`() {
+        // Fermeture nettement partielle : seul « Souple » l'accepte.
+        assertTrue("« Souple » doit accepter une fermeture partielle", pressesWith(ClickTuning.RELAXED, 0.44f))
+        assertTrue(!pressesWith(ClickTuning.STANDARD, 0.44f))
+        assertTrue(!pressesWith(ClickTuning.BRISK, 0.44f))
 
-        // Fermeture lente : seul « Souple » l'accepte.
-        assertTrue("« Souple » doit accepter une fermeture lente", pressesWith(ClickTuning.RELAXED, 18))
-        assertTrue(!pressesWith(ClickTuning.STANDARD, 18))
+        // Fermeture presque complète : « Vif » décroche encore, les deux autres passent.
+        assertTrue(pressesWith(ClickTuning.RELAXED, 0.38f))
+        assertTrue(pressesWith(ClickTuning.STANDARD, 0.38f))
+        assertTrue("« Vif » doit exiger le fond de la course", !pressesWith(ClickTuning.BRISK, 0.38f))
 
-        // Repositionnement de la main : aucun réglage ne doit y voir un appui.
+        // Main qui se referme à peine : aucun réglage ne doit y voir un appui.
         ClickTuning.entries.forEach { tuning ->
-            assertTrue("$tuning confond un repositionnement avec un appui", !pressesWith(tuning, 30))
+            assertTrue(
+                "$tuning confond une main à peine refermée avec un appui",
+                !pressesWith(tuning, 0.60f)
+            )
         }
     }
 

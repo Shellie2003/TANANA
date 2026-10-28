@@ -37,6 +37,7 @@ import com.example.R
 import com.example.control.BindingsStore
 import com.example.control.Command
 import com.example.control.CommandList
+import com.example.control.EdgeScroller
 import com.example.control.PinchTelemetry
 import com.example.control.Pointer
 import com.example.control.PointerEvent
@@ -82,6 +83,14 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
      */
     private var pointer = Pointer()
     private val panel = CommandPanel()
+
+    /**
+     * Défilement par les bords : un second chemin, qui ne demande aucun pincement maintenu.
+     *
+     * Hors du [pointer] à dessein — il ne produit pas d'évènement de pointage et n'a rien à
+     * arbitrer avec les trois issues du pincement. Il lit la position, et c'est tout.
+     */
+    private val edgeScroller = EdgeScroller()
     private var commands = CommandList()
 
     /**
@@ -406,7 +415,15 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             // L'anneau affiche la progression réelle du pincement : la même grandeur que celle
             // qui décide. Ce que l'utilisateur voit se remplir correspond donc à ce qui se passe.
             pinchProgress = pointer.pinchProgress,
-            longPressProgress = pointer.longPressProgress,
+            // holdProgress, et non longPressProgress : l'anneau porte l'appui long quand le bouton
+            // est enfoncé, et le maintien quand il ne l'est pas. Les deux ne peuvent pas courir
+            // ensemble, et ce sont la même information pour qui regarde — un compte à rebours
+            // qu'un mouvement annule.
+            // L'amorçage du défilement par les bords partage le même anneau, et pour la même
+            // raison : c'est encore un compte à rebours qu'un mouvement annule. Les trois sont
+            // mutuellement exclusifs — l'appui long exige le bouton enfoncé, le maintien l'exige
+            // relâché, et le défilement par les bords est inhibé pendant un pincement.
+            longPressProgress = maxOf(pointer.holdProgress, edgeScroller.state?.progress ?: 0f),
             visible = state.isHandDetected
         )
         // Panneau entièrement fermé et sans aperçu : rien à transmettre. C'est le cas courant —
@@ -422,8 +439,28 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         when {
             keyboardOpen -> routeToKeyboard(events, now)
             panel.isOpen -> routeToPanel(events)
-            else -> events.forEach { dispatch(it) }
+            else -> {
+                events.forEach { dispatch(it) }
+                // Le défilement par les bords ne vit que dans l'interface du dessous : le clavier
+                // gestuel et le panneau de commandes occupent déjà les bords et ont leurs propres
+                // règles, où un défilement n'aurait aucun sens.
+                edgeStep(cursorX, cursorY, now)
+            }
         }
+    }
+
+    /**
+     * Un pas de défilement par les bords, s'il y a lieu.
+     *
+     * Le curseur posé contre un bord suffit : aucun pincement à tenir, donc aucune dépendance à la
+     * mesure la plus fragile de la chaîne — l'écart pouce-index, que le pincement lui-même
+     * perturbe. Voir [EdgeScroller] pour le détail du raisonnement.
+     */
+    private fun edgeStep(x: Float, y: Float, now: Long) {
+        val direction = edgeScroller.update(x, y, pointer.isPressed, now) ?: return
+        StarkAccessibilityService.perform(
+            SystemAction.ScrollStep(x, y, direction), screenWidth, screenHeight
+        )
     }
 
     /**

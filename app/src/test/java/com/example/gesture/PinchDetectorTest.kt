@@ -117,15 +117,28 @@ class PinchDetectorTest {
         assertEquals(0, events.presses())
     }
 
+    /**
+     * **Ce test affirmait l'inverse, et il avait tort.** Il vérifiait qu'une fermeture lente était
+     * rejetée, au motif qu'une impulsion volontaire est brève et qu'un repositionnement de main est
+     * lent. La prémisse est juste sur le geste et fausse sur la mesure : le critère était exprimé en
+     * millisecondes mais évalué en images, et la cadence réelle de la chaîne caméra-inférence sur un
+     * téléphone est de 12 à 20 images par seconde, non 30. Mesuré en harnais, une fermeture
+     * volontaire mais posée de 300 ms était rejetée à toute cadence inférieure à 30 — donc, en
+     * pratique, toujours.
+     *
+     * Le critère a été retiré, et ce test décrit maintenant la propriété voulue : une fermeture
+     * **complète** aboutit, quelle que soit sa lenteur. Ce qui écarte un repositionnement de main
+     * n'est pas sa durée mais sa **profondeur** — replacer sa main n'amène pas le pouce sur
+     * l'index — et c'est ce que vérifient les deux tests suivants.
+     */
     @Test
-    fun `une fermeture lente est un repositionnement, pas un appui`() {
+    fun `une fermeture lente mais complete aboutit`() {
         val d = PinchDetector()
         val t0 = settle(d)
-        // Descente régulière sur une seconde : la main se replace, elle ne frappe pas.
+        // Descente régulière sur une seconde, jusqu'au contact franc.
         val slow = (0..30).map { 0.85f - it * (0.75f / 30f) }
         val events = play(d, slow, startMs = t0)
-        assertEquals(0, events.presses())
-        assertEquals(PinchDetector.Rejection.TOO_SLOW, d.lastRejection)
+        assertEquals("une fermeture complète a été rejetée pour sa lenteur", 1, events.presses())
     }
 
     @Test
@@ -144,32 +157,58 @@ class PinchDetectorTest {
         assertEquals(0, play(d, jitter).presses())
     }
 
+    /**
+     * Un quasi-contact **tenu longtemps** ne compte toujours qu'un rejet.
+     *
+     * Le verrou de jugement est ce qui le garantit : sans lui, une main posée sous le seuil serait
+     * réévaluée à chaque image et noierait le compteur, masquant les vraies causes.
+     *
+     * Ce test portait auparavant sur une descente lente, donc sur le critère de vitesse qui a été
+     * retiré — la trajectoire était rejetée pour sa durée. Elle est désormais rejetée pour sa
+     * profondeur, ce qui est le seul motif restant et celui qu'il faut vérifier.
+     *
+     * La borne est **deux** et non un, et c'est mesuré, pas concédé : tenir une demi-fermeture
+     * deux secondes fait de cette posture le nouveau repos, la ligne de base s'y adapte — c'est
+     * voulu, voir [PinchDetector.Config.baselineRestFall] — et cette adaptation clôt la tentative
+     * en cours puis en ouvre une autre. Deux jugements pour deux états de la main successifs, donc,
+     * et non soixante pour soixante images. C'est cette dernière différence qui compte : le défaut
+     * d'origine était une réévaluation **par image**, qui noyait les vraies causes.
+     */
     @Test
-    fun `un rejet repete ne compte qu une fois`() {
+    fun `un quasi-contact tenu longtemps ne noie pas le compteur`() {
         val d = PinchDetector()
         val t0 = settle(d)
-        // Le pouce descend lentement puis reste posé : un seul geste, donc un seul rejet.
-        play(d, (0..20).map { 0.85f - it * 0.035f } + List(60) { 0.15f }, startMs = t0)
-        assertEquals(1, d.rejectedCount)
+        // Le pouce s'arrête au-dessus du seuil et y reste deux secondes, puis se rouvre.
+        play(d, listOf(0.85f, 0.58f) + List(60) { 0.55f } + List(4) { 0.85f }, startMs = t0)
+        assertEquals(PinchDetector.Rejection.TOO_SHALLOW, d.lastRejection)
+        assertTrue("compteur noyé : ${d.rejectedCount} rejets", d.rejectedCount <= 2)
     }
 
     /**
      * Un geste déjà jugé ne doit pas être recompté sous une autre cause quand la main se rouvre.
      *
      * Le défaut existait depuis le début et n'était pas visible : les trajectoires testées
-     * s'arrêtaient en position fermée, sans jamais rouvrir. Une fermeture lente comptait donc un
-     * rejet « trop lent », puis un second « quasi-contact » à la réouverture — et c'était la
-     * seconde cause qui s'affichait. L'utilisateur recevait ainsi un conseil portant sur un défaut
-     * qu'il n'avait pas commis, ce qui est pire que pas de conseil du tout.
+     * s'arrêtaient en position fermée, sans jamais rouvrir. Un geste déjà rejeté comptait donc son
+     * rejet, puis un second « quasi-contact » à la réouverture — et c'était la seconde cause qui
+     * s'affichait. L'utilisateur recevait ainsi un conseil portant sur un défaut qu'il n'avait pas
+     * commis, ce qui est pire que pas de conseil du tout.
+     *
+     * Le cas se vérifie désormais sur l'anti-rebond, le critère de rejet qui subsiste à côté de la
+     * profondeur : deux impulsions collées, dont la seconde est absorbée, puis la main se rouvre.
      */
     @Test
-    fun `une fermeture lente qui se rouvre ne compte qu un rejet`() {
+    fun `un geste deja juge ne compte pas un second rejet en se rouvrant`() {
         val d = PinchDetector()
         val t0 = settle(d)
-        val slow = (0..30).map { 0.85f - it * (0.75f / 30f) }
-        play(d, slow + List(10) { 0.85f }, startMs = t0)
-        assertEquals(1, d.rejectedCount)
-        assertEquals(PinchDetector.Rejection.TOO_SLOW, d.lastRejection)
+        // Première impulsion : aboutit. Relâchement franc sur deux images, puis re-contact
+        // immédiat, absorbé par l'anti-rebond. Puis la main se rouvre franchement.
+        play(
+            d,
+            listOf(0.85f, 0.10f, 0.80f, 0.80f, 0.10f, 0.08f) + List(10) { 0.85f },
+            startMs = t0
+        )
+        assertEquals(PinchDetector.Rejection.COOLDOWN, d.lastRejection)
+        assertEquals("la réouverture a ajouté un rejet de plus", 1, d.rejectedCount)
     }
 
     /**
@@ -217,11 +256,11 @@ class PinchDetectorTest {
         val d = PinchDetector()
         var t = settle(d, rest = 0.85f)
 
-        // Une fermeture lente : rejetée, et le verrou se pose.
-        (0..20).forEach { i ->
-            d.update(0.85f - i * 0.035f, 0.5f, 0.5f, t); t += frameMs
+        // Une approche partielle : rejetée pour sa profondeur, et le verrou se pose.
+        listOf(0.85f, 0.62f, 0.56f, 0.60f, 0.72f, 0.78f).forEach { r ->
+            d.update(r, 0.5f, 0.5f, t); t += frameMs
         }
-        assertEquals(PinchDetector.Rejection.TOO_SLOW, d.lastRejection)
+        assertEquals(PinchDetector.Rejection.TOO_SHALLOW, d.lastRejection)
 
         // La main se rouvre **partiellement**, sans jamais revenir grande ouverte, puis pince
         // franchement. C'est le cas que l'ancienne bande absolue rendait impossible.
@@ -383,7 +422,8 @@ class PinchDetectorTest {
     fun `un quasi-contact est signale comme tel`() {
         val d = PinchDetector()
         val t0 = settle(d, rest = 0.90f)
-        play(d, listOf(0.90f, 0.45f, 0.40f, 0.60f, 0.90f), startMs = t0)
+        // S'arrête nettement au-dessus du seuil, puis repart : c'est un quasi-contact.
+        play(d, listOf(0.90f, 0.62f, 0.56f, 0.70f, 0.90f, 0.90f), startMs = t0)
         assertEquals(PinchDetector.Rejection.TOO_SHALLOW, d.lastRejection)
         assertEquals(1, d.rejectedCount)
     }

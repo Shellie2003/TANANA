@@ -74,6 +74,12 @@ sealed interface PointerEvent {
  * | pincer et relâcher sans bouger | appui |
  * | pincer et rester immobile | appui long |
  * | pincer et déplacer la main | tracé continu — défilement, balayage, glisser-déposer |
+ * | viser et ne plus bouger | appui, sans pincer du tout — voir [Config.dwellEnabled] |
+ *
+ * La dernière ligne est un **second chemin vers le même appui**, et non un geste de plus : il n'y a
+ * rien à apprendre ni à distinguer, puisque ne rien faire est ce qui le déclenche. Il existe parce
+ * que tout appui obtenu par l'articulation des doigts hérite de la fiabilité avec laquelle la
+ * caméra voit ces doigts, et que cette fiabilité a fait défaut — longuement.
  *
  * C'est exactement une souris à un bouton, et c'est voulu : personne n'a à apprendre une souris.
  * C'est aussi, à peu de chose près, le jeu de gestes de Vision Pro, de HoloLens et de Quest.
@@ -135,7 +141,59 @@ class Pointer(
         val handLossGraceMs: Long = 250L,
 
         /** En deçà de cette plausibilité, la détection est traitée comme une absence de main. */
-        val minQuality: Float = 0.35f
+        val minQuality: Float = 0.35f,
+
+        /**
+         * Clic par maintien : garder le curseur immobile sur une cible déclenche un appui.
+         *
+         * ## Pourquoi un second chemin vers le même appui
+         *
+         * Le pincement a échoué sur l'appareil trois fois de suite, et la cause s'est révélée
+         * structurelle : quand le pouce touche l'index, les deux extrémités se confondent dans
+         * l'image et le modèle conserve entre elles une distance plancher. Le seuil de contact
+         * pouvait donc se trouver **hors d'atteinte**, et aucun soin mis à pincer n'y changeait
+         * rien. Ce défaut précis est corrigé dans [com.example.gesture.PinchDetector], mais la
+         * leçon dépasse le correctif : **tout appui qui repose sur l'articulation des doigts hérite
+         * de la fiabilité avec laquelle la caméra voit ces doigts**, et cette fiabilité n'est pas
+         * garantie.
+         *
+         * Le maintien ne demande aucune articulation. Il ne demande qu'une position, c'est-à-dire
+         * la grandeur la mieux mesurée de toute la chaîne — celle qui marchait déjà quand rien
+         * d'autre ne marchait. C'est le mécanisme de tous les suivis oculaires et céphaliques, pour
+         * cette raison exactement : il ne peut pas être bloqué par ce qui bloque un geste.
+         *
+         * Il ne remplace pas le pincement, qui reste plus rapide et plus intentionnel. Il garantit
+         * que l'appareil reste utilisable quand le pincement ne part pas.
+         */
+        val dwellEnabled: Boolean = true,
+
+        /**
+         * Rayon dans lequel le curseur doit rester pour que le maintien se poursuive.
+         *
+         * Plus large que [touchSlop] : viser puis attendre demande de tenir la main en l'air plus
+         * longtemps qu'un appui, et le tremblement s'y accumule. Un rayon trop serré rendrait
+         * l'attente interminable, puisque le moindre frémissement la relancerait.
+         */
+        val dwellRadius: Float = 0.030f,
+
+        /**
+         * Durée d'immobilité qui déclenche l'appui.
+         *
+         * Plus long que l'appui long d'Android, délibérément : c'est un appui qu'on ne demande pas
+         * explicitement, donc il doit laisser le temps de l'éviter. L'anneau de progression le rend
+         * visible, de sorte que bouger la main l'annule avant la fin.
+         */
+        val dwellMs: Long = 900L,
+
+        /**
+         * Déplacement à parcourir avant qu'un nouveau maintien puisse déclencher.
+         *
+         * C'est ce qui empêche la répétition, et c'est indispensable : sans cela, une main posée
+         * sur une cible produirait un appui par seconde indéfiniment. Il faut donc avoir
+         * **quitté** la cible pour pouvoir en viser une autre — ce qui correspond exactement à
+         * l'usage, et rend la rafale impossible.
+         */
+        val dwellRearmTravel: Float = 0.07f
     )
 
     /** Où en est le geste courant. */
@@ -193,9 +251,32 @@ class Pointer(
     var longPressProgress = 0f
         private set
 
+    /** Progression du maintien en cours, 0..1. */
+    var dwellProgress = 0f
+        private set
+
+    /**
+     * La seule progression affichable à un instant donné.
+     *
+     * L'appui long ne court que bouton enfoncé, le maintien que bouton relâché : les deux ne
+     * peuvent pas être en cours ensemble. Ils partagent donc le même anneau sans ambiguïté, ce qui
+     * évite d'encombrer le curseur d'un troisième indicateur pour une information qui est, des deux
+     * côtés, la même — un compte à rebours qu'un mouvement annule.
+     */
+    val holdProgress: Float get() = if (isPressed) longPressProgress else dwellProgress
+
+    /** Vrai quand un maintien peut déclencher : la main a quitté le dernier point cliqué. */
+    private var dwellArmed = false
+    private var dwellAnchorX = 0.5f
+    private var dwellAnchorY = 0.5f
+    private var dwellSince = 0L
+    private var lastDwellX = 0.5f
+    private var lastDwellY = 0.5f
+
     fun reset() {
         phase = Phase.IDLE
         longPressProgress = 0f
+        disarmDwell(cursorX, cursorY)
         lastSeenAt = Long.MIN_VALUE
         detector.reset()
     }
@@ -242,6 +323,9 @@ class Pointer(
                 longPressProgress = 0f
                 palmAnchorX = palmX
                 palmAnchorY = palmY
+                // Un pincement abouti désarme le maintien : sans cela, viser puis pincer
+                // produirait les deux appuis, et le second sur une cible déjà quittée.
+                disarmDwell(x, y)
                 emptyList()
             }
 
@@ -273,6 +357,58 @@ class Pointer(
         return closing
     }
 
+    /**
+     * Le maintien : bouton relâché, curseur immobile, l'appui part tout seul.
+     *
+     * Trois conditions, et chacune écarte un défaut précis. Il faut être **armé**, c'est-à-dire
+     * avoir quitté le dernier point cliqué — sinon une main posée produirait un appui par seconde.
+     * Il faut rester dans le rayon — sinon ce serait un appui à l'aveugle pendant un déplacement.
+     * Et il faut y rester la durée entière, visible dans l'anneau, donc annulable en bougeant.
+     */
+    private fun dwell(nowMs: Long): List<PointerEvent> {
+        if (!config.dwellEnabled) {
+            dwellProgress = 0f
+            return emptyList()
+        }
+
+        if (!dwellArmed) {
+            if (hypot(cursorX - lastDwellX, cursorY - lastDwellY) >= config.dwellRearmTravel) {
+                dwellArmed = true
+                dwellAnchorX = cursorX
+                dwellAnchorY = cursorY
+                dwellSince = nowMs
+            }
+            dwellProgress = 0f
+            return emptyList()
+        }
+
+        // Le curseur a quitté le rayon : la visée recommence d'ici.
+        if (hypot(cursorX - dwellAnchorX, cursorY - dwellAnchorY) > config.dwellRadius) {
+            dwellAnchorX = cursorX
+            dwellAnchorY = cursorY
+            dwellSince = nowMs
+            dwellProgress = 0f
+            return emptyList()
+        }
+
+        val heldMs = nowMs - dwellSince
+        dwellProgress = (heldMs.toFloat() / config.dwellMs).coerceIn(0f, 1f)
+        if (heldMs < config.dwellMs) return emptyList()
+
+        // L'appui porte sur l'ancre, et non sur la position courante : c'est l'endroit visé
+        // pendant toute l'attente, donc celui que l'utilisateur a sous les yeux.
+        val tap = PointerEvent.Tap(dwellAnchorX, dwellAnchorY)
+        disarmDwell(dwellAnchorX, dwellAnchorY)
+        return listOf(tap)
+    }
+
+    private fun disarmDwell(x: Float, y: Float) {
+        dwellArmed = false
+        dwellProgress = 0f
+        lastDwellX = x
+        lastDwellY = y
+    }
+
     /** Bouton relâché : c'est ici que l'appui bref se décide, puisqu'il n'est rien d'autre. */
     private fun onRelease(): List<PointerEvent> {
         val events = when (phase) {
@@ -298,8 +434,9 @@ class Pointer(
         if (!detector.isPressed) {
             phase = Phase.HOVER
             longPressProgress = 0f
-            return emptyList()
+            return dwell(nowMs)
         }
+        dwellProgress = 0f
 
         // Déplacement mesuré sur la **paume**, et non sur le curseur : c'est la main qui décide si
         // le geste est un appui ou un tracé, et la paume en est la mesure fidèle. Le bout de

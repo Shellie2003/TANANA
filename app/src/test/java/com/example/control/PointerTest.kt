@@ -340,4 +340,86 @@ class PointerTest {
         }
         assertEquals(5, d.only<PointerEvent.Tap>().size)
     }
+
+    // --- Le maintien, second chemin vers l'appui ----------------------------------------------
+
+    /**
+     * La garantie que cherche ce chemin : **un appui sans aucune articulation des doigts.**
+     *
+     * Il existe parce que le pincement a échoué sur l'appareil pour une raison structurelle — le
+     * pouce posé sur l'index se confond avec lui dans l'image — et que tout appui reposant sur les
+     * doigts hérite de cette fragilité. Une position, elle, est la grandeur la mieux mesurée de
+     * toute la chaîne.
+     */
+    @Test
+    fun `viser et ne plus bouger produit un appui sans pincer`() {
+        val d = driver(0.5f, 0.5f)
+        // Déplacement franc : c'est lui qui arme le maintien.
+        d.frames(3, 0.8f, 0.3f, open)
+        // Puis l'immobilité, main parfaitement ouverte.
+        d.frames(32, 0.8f, 0.3f, open)
+
+        val taps = d.only<PointerEvent.Tap>()
+        assertEquals("le maintien n'a produit aucun appui", 1, taps.size)
+        assertEquals(0.8f, taps[0].x, 1e-3f)
+        assertEquals(0.3f, taps[0].y, 1e-3f)
+    }
+
+    /**
+     * Le défaut qu'il faut absolument écarter : une main simplement posée produirait un appui par
+     * seconde, indéfiniment. Le réarmement par le déplacement est ce qui l'interdit.
+     */
+    @Test
+    fun `une main posee ne produit pas une rafale d appuis`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        // Trois secondes d'immobilité : de quoi produire trois appuis si rien ne l'empêchait.
+        d.frames(95, 0.8f, 0.3f, open)
+        assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    @Test
+    fun `le maintien ne declenche pas tant que la main n a pas bouge`() {
+        val d = driver(0.5f, 0.5f)
+        // Main immobile depuis le début, jamais déplacée : rien ne doit partir.
+        d.frames(60, 0.5f, 0.5f, open)
+        assertTrue(
+            "un appui est parti sans que la main ait jamais bougé",
+            d.only<PointerEvent.Tap>().isEmpty()
+        )
+    }
+
+    @Test
+    fun `bouger annule le maintien avant son terme`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        // Vingt images d'attente, puis la main repart : l'appui ne doit pas aboutir.
+        d.frames(20, 0.8f, 0.3f, open)
+        d.frames(6, 0.2f, 0.7f, open)
+        assertTrue("le maintien a abouti malgré le mouvement", d.only<PointerEvent.Tap>().isEmpty())
+    }
+
+    /** Viser puis pincer ne doit pas produire deux appuis pour un seul geste. */
+    @Test
+    fun `un pincement n ajoute pas un appui par maintien`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frames(10, 0.8f, 0.3f, open)
+        d.frame(0.8f, 0.3f, closed)
+        d.frame(0.8f, 0.3f, closed)
+        d.release(0.8f, 0.3f)
+        // Puis la main reste posée là où elle vient de cliquer.
+        d.frames(40, 0.8f, 0.3f, open)
+        assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    @Test
+    fun `le maintien peut etre desactive`() {
+        val d = Driver(Pointer(Pointer.Config(dwellEnabled = false)))
+        d.frames(40, 0.5f, 0.5f, open)
+        d.events.clear()
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frames(60, 0.8f, 0.3f, open)
+        assertTrue(d.only<PointerEvent.Tap>().isEmpty())
+    }
 }
