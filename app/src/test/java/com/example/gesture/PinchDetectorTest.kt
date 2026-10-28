@@ -43,7 +43,7 @@ class PinchDetectorTest {
 
     /** Impulsion franche : ouvert -> contact -> retour. */
     private fun tap(rest: Float = 0.85f) =
-        listOf(rest, 0.55f, 0.18f, 0.10f, 0.45f, rest, rest)
+        listOf(rest, 0.55f, 0.18f, 0.10f, 0.45f, rest, rest, rest)
 
     private fun List<PinchDetector.Event>.presses() = count { it == PinchDetector.Event.PRESS }
     private fun List<PinchDetector.Event>.releases() = count { it == PinchDetector.Event.RELEASE }
@@ -98,6 +98,11 @@ class PinchDetectorTest {
         assertTrue("le bouton devrait être enfoncé", d.isPressed)
         repeat(20) { d.update(0.08f, 0.5f, 0.5f, t); t += frameMs }
         assertTrue("le bouton s'est relâché tout seul", d.isPressed)
+
+        // Le relâchement demande deux images : une seule ne doit pas suffire, c'est précisément
+        // l'anti-décrochage.
+        d.update(0.85f, 0.5f, 0.5f, t); t += frameMs
+        assertTrue("une seule image a suffi à relâcher", d.isPressed)
         d.update(0.85f, 0.5f, 0.5f, t)
         assertTrue("le bouton est resté enfoncé après ouverture", !d.isPressed)
     }
@@ -168,15 +173,32 @@ class PinchDetectorTest {
     }
 
     /**
-     * L'anti-rebond est posé sur le bouton lui-même, et non sur l'appui : un décrochage du suivi
-     * qui rouvre puis referme le contact en deux images ne doit pas produire deux enfoncements.
+     * **Le défaut qui arrêtait le défilement en pleine course.** Une seule image de suivi aberrante
+     * — un flou de mouvement pendant un balayage — suffisait à faire croire que le pouce s'était
+     * rouvert : le tracé se terminait, le défilement s'arrêtait, et il fallait repincer alors que
+     * le pouce touchait toujours l'index.
+     *
+     * Le contact doit donc survivre à une image isolée au-dessus du seuil, et le geste rester un
+     * seul enfoncement du début à la fin.
      */
     @Test
-    fun `un rebond du suivi ne produit pas deux enfoncements`() {
+    fun `une image aberrante n interrompt pas le contact`() {
         val d = PinchDetector()
         val t0 = settle(d)
-        // Contact, remontée d'une image, re-contact immédiat : c'est un seul geste.
-        val events = play(d, listOf(0.85f, 0.10f, 0.60f, 0.10f, 0.08f, 0.85f), startMs = t0)
+        // Contact, une image qui décroche franchement, puis le contact reprend.
+        val events = play(d, listOf(0.85f, 0.10f, 0.70f, 0.10f, 0.08f, 0.08f), startMs = t0)
+        assertEquals(1, events.presses())
+        assertEquals("le contact a été interrompu par une image isolée", 0, events.releases())
+        assertTrue("le bouton devrait toujours être enfoncé", d.isPressed)
+    }
+
+    /** L'anti-rebond reste en place pour deux enfoncements réellement trop rapprochés. */
+    @Test
+    fun `deux enfoncements trop rapproches sont filtres`() {
+        val d = PinchDetector()
+        val t0 = settle(d)
+        // Contact, relâchement franc sur deux images, puis re-contact immédiat.
+        val events = play(d, listOf(0.85f, 0.10f, 0.80f, 0.80f, 0.10f, 0.08f), startMs = t0)
         assertEquals(1, events.presses())
         assertEquals(PinchDetector.Rejection.COOLDOWN, d.lastRejection)
     }
@@ -204,7 +226,7 @@ class PinchDetectorTest {
         // La main se rouvre **partiellement**, sans jamais revenir grande ouverte, puis pince
         // franchement. C'est le cas que l'ancienne bande absolue rendait impossible.
         repeat(6) { d.update(0.55f, 0.5f, 0.5f, t); t += frameMs }
-        val events = play(d, listOf(0.55f, 0.12f, 0.09f, 0.45f, 0.55f), startMs = t)
+        val events = play(d, listOf(0.55f, 0.12f, 0.09f, 0.45f, 0.55f, 0.55f), startMs = t)
         assertEquals("l'appui est resté bloqué par le rejet précédent", 1, events.presses())
     }
 
@@ -223,7 +245,7 @@ class PinchDetectorTest {
         // La main se repose plus près d'elle-même, sous l'ancienne bande ouverte (0,86).
         repeat(10) { d.update(0.75f, 0.5f, 0.5f, t); t += frameMs }
 
-        val events = play(d, listOf(0.75f, 0.15f, 0.12f, 0.50f, 0.75f), startMs = t)
+        val events = play(d, listOf(0.75f, 0.15f, 0.12f, 0.50f, 0.75f, 0.75f), startMs = t)
         assertEquals("la nouvelle posture n'a pas été apprise assez vite", 1, events.presses())
     }
 
@@ -273,7 +295,7 @@ class PinchDetectorTest {
     fun `une main a course reduite peut appuyer`() {
         val d = PinchDetector()
         val t0 = settle(d, rest = 0.50f)
-        val events = play(d, listOf(0.50f, 0.30f, 0.08f, 0.06f, 0.30f, 0.50f), startMs = t0)
+        val events = play(d, listOf(0.50f, 0.30f, 0.08f, 0.06f, 0.30f, 0.50f, 0.50f), startMs = t0)
         assertEquals(1, events.presses())
     }
 
@@ -304,7 +326,7 @@ class PinchDetectorTest {
         var t = settle(d)
         var presses = 0
         repeat(6) {
-            listOf(0.85f, 0.12f, 0.09f, 0.50f, 0.85f, 0.85f).forEach { ratio ->
+            listOf(0.85f, 0.12f, 0.09f, 0.50f, 0.85f, 0.85f, 0.85f).forEach { ratio ->
                 if (d.update(ratio, 0.5f, 0.5f, t) == PinchDetector.Event.PRESS) presses++
                 t += frameMs
             }
@@ -323,7 +345,7 @@ class PinchDetectorTest {
         val t0 = settle(d)
         val events = play(
             d,
-            listOf(0.85f, 0.10f) + List(90) { 0.08f } + listOf(0.50f, 0.85f),
+            listOf(0.85f, 0.10f) + List(90) { 0.08f } + listOf(0.50f, 0.85f, 0.85f),
             startMs = t0
         )
         assertEquals(1, events.presses())

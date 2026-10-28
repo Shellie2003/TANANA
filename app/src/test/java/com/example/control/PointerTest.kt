@@ -24,20 +24,38 @@ class PointerTest {
         var t = 0L
         val events = mutableListOf<PointerEvent>()
 
-        fun frame(x: Float = 0.5f, y: Float = 0.5f, pinch: Float = 0.85f, present: Boolean = true) {
+        fun frame(
+            x: Float = 0.5f,
+            y: Float = 0.5f,
+            pinch: Float = 0.85f,
+            present: Boolean = true,
+            palmX: Float = x,
+            palmY: Float = y
+        ) {
             events += pointer.update(
                 handPresent = present,
                 quality = if (present) 1f else 0f,
                 x = x,
                 y = y,
                 pinchRatio = pinch,
-                nowMs = t
+                nowMs = t,
+                palmX = palmX,
+                palmY = palmY
             )
             t += 33L
         }
 
         fun frames(count: Int, x: Float = 0.5f, y: Float = 0.5f, pinch: Float = 0.85f) {
             repeat(count) { frame(x, y, pinch) }
+        }
+
+        /**
+         * Relâche le pincement. Deux images, parce que le détecteur exige désormais deux images
+         * consécutives au-dessus du seuil : une seule est traitée comme une erreur de suivi, ce qui
+         * est ce qui empêche un flou de mouvement d'interrompre un défilement en cours.
+         */
+        fun release(x: Float = 0.5f, y: Float = 0.5f) {
+            frames(2, x, y, 0.85f)
         }
     }
 
@@ -59,7 +77,7 @@ class PointerTest {
         val d = driver(0.3f, 0.7f)
         d.frame(0.3f, 0.7f, closed)
         d.frame(0.3f, 0.7f, closed)
-        d.frame(0.3f, 0.7f, open)
+        d.release(0.3f, 0.7f)
 
         val taps = d.only<PointerEvent.Tap>()
         assertEquals(1, taps.size)
@@ -73,7 +91,7 @@ class PointerTest {
         val d = driver()
         d.frame(0.5f, 0.5f, closed)
         d.frames(25, 0.5f, 0.5f, closed)
-        d.frame(0.5f, 0.5f, open)
+        d.release()
 
         assertEquals(1, d.only<PointerEvent.LongPress>().size)
         assertTrue(
@@ -88,7 +106,7 @@ class PointerTest {
         d.frame(0.2f, 0.5f, closed)
         // La main traverse l'écran, bouton tenu.
         for (i in 1..10) d.frame(0.2f + i * 0.06f, 0.5f, closed)
-        d.frame(0.8f, 0.5f, open)
+        d.release(0.8f, 0.5f)
 
         assertEquals(1, d.only<PointerEvent.StrokeBegin>().size)
         assertEquals(1, d.only<PointerEvent.StrokeEnd>().size)
@@ -137,7 +155,7 @@ class PointerTest {
         d.frame(0.5f, 0.5f, closed)
         // Oscillation de 1 % d'écran, soit nettement sous le seuil de déplacement.
         for (i in 1..5) d.frame(0.5f + if (i % 2 == 0) 0.008f else -0.008f, 0.5f, closed)
-        d.frame(0.5f, 0.5f, open)
+        d.release()
 
         assertEquals(1, d.only<PointerEvent.Tap>().size)
         assertTrue(d.only<PointerEvent.StrokeBegin>().isEmpty())
@@ -155,7 +173,7 @@ class PointerTest {
         val d = driver()
         d.frame(0.5f, 0.5f, closed)
         d.frames(30, 0.5f, 0.5f, closed)
-        d.frame(0.5f, 0.5f, open)
+        d.release()
         d.frames(5, 0.5f, 0.5f, open)
 
         assertEquals(1, d.only<PointerEvent.LongPress>().size)
@@ -240,7 +258,7 @@ class PointerTest {
         assertEquals(Pointer.Phase.PENDING, d.pointer.phase)
         d.frame(0.6f, 0.5f, closed)
         assertEquals(Pointer.Phase.STROKE, d.pointer.phase)
-        d.frame(0.6f, 0.5f, open)
+        d.release(0.6f, 0.5f)
         assertEquals(Pointer.Phase.HOVER, d.pointer.phase)
     }
 
@@ -252,6 +270,63 @@ class PointerTest {
         assertTrue(d.pointer.isPressed)
     }
 
+    // --- Le défilement est piloté par la paume ------------------------------------------------
+
+    /**
+     * **La correction du défilement « difficile avec le pincement ».** Le curseur vient du bout de
+     * l'index, et c'est justement l'endroit où le pouce vient se poser en pinçant : les deux
+     * extrémités se confondent dans l'image, l'estimation devient bruitée, et le gain du
+     * défilement multipliait ce bruit. Un tracé doit donc transporter la position de la paume, que
+     * la fermeture des doigts ne bouge pas.
+     */
+    @Test
+    fun `le trace transporte la position de la paume`() {
+        val d = driver(0.5f, 0.5f)
+        d.frame(0.5f, 0.5f, closed, palmX = 0.4f, palmY = 0.6f)
+        for (i in 1..4) {
+            d.frame(0.5f, 0.5f, closed, palmX = 0.4f + i * 0.03f, palmY = 0.6f)
+        }
+
+        val begin = d.only<PointerEvent.StrokeBegin>().single()
+        assertEquals("le tracé doit mémoriser la paume de l'enfoncement", 0.4f, begin.driveX, 1e-4f)
+        assertEquals(0.6f, begin.driveY, 1e-4f)
+
+        val moves = d.only<PointerEvent.StrokeMove>()
+        assertTrue("aucun déplacement transmis", moves.isNotEmpty())
+        assertTrue("la paume n'avance pas : ${moves.last().driveX}", moves.last().driveX > 0.5f)
+    }
+
+    /**
+     * Le déplacement qui décide entre appui et tracé se mesure sur la **paume**. Un curseur qui
+     * tremble parce que le pouce s'est posé sur l'index ne doit pas transformer un appui en
+     * glisser : c'est la main qui décide, et la paume en est la mesure fidèle.
+     */
+    @Test
+    fun `un curseur agite sur une paume immobile reste un appui`() {
+        val d = driver(0.5f, 0.5f)
+        d.frame(0.5f, 0.5f, closed, palmX = 0.5f, palmY = 0.5f)
+        // Le curseur saute de 6 % — bien au-delà du seuil — mais la paume ne bouge pas.
+        for (i in 1..5) {
+            val jitter = if (i % 2 == 0) 0.06f else -0.06f
+            d.frame(0.5f + jitter, 0.5f, closed, palmX = 0.5f, palmY = 0.5f)
+        }
+        d.release(0.5f, 0.5f)
+
+        assertTrue("le tremblement du curseur a lancé un tracé", d.only<PointerEvent.StrokeBegin>().isEmpty())
+        assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    /** Symétriquement, une paume qui se déplace lance bien un tracé, curseur immobile ou non. */
+    @Test
+    fun `une paume qui se deplace lance un trace`() {
+        val d = driver(0.5f, 0.5f)
+        d.frame(0.5f, 0.5f, closed, palmX = 0.5f, palmY = 0.5f)
+        for (i in 1..4) {
+            d.frame(0.5f, 0.5f, closed, palmX = 0.5f, palmY = 0.5f + i * 0.02f)
+        }
+        assertEquals(1, d.only<PointerEvent.StrokeBegin>().size)
+    }
+
     // --- Cadence ------------------------------------------------------------------------------
 
     @Test
@@ -260,7 +335,7 @@ class PointerTest {
         repeat(5) {
             d.frame(0.5f, 0.5f, closed)
             d.frame(0.5f, 0.5f, closed)
-            d.frame(0.5f, 0.5f, open)
+            d.release()
             d.frames(3, 0.5f, 0.5f, open)
         }
         assertEquals(5, d.only<PointerEvent.Tap>().size)

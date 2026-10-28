@@ -22,11 +22,28 @@ sealed interface SystemAction {
     /** Appui long : ouvre les menus contextuels, sélectionne du texte. */
     data class LongPress(val x: Float, val y: Float) : SystemAction
 
-    /** Début d'un glisser : signalé à la superposition, pas au système. */
-    data class DragStart(val x: Float, val y: Float) : SystemAction
+    /**
+     * Début d'un tracé continu.
+     *
+     * [x] et [y] sont le point d'application — là où le doigt se pose. [driveX] et [driveY] sont le
+     * centre de la paume, qui sert à mesurer le déplacement de la main : c'est lui qui pilote le
+     * défilement, parce que la fermeture des doigts ne le bouge pas, alors qu'elle perturbe le bout
+     * de l'index dont vient le curseur.
+     */
+    data class DragStart(
+        val x: Float,
+        val y: Float,
+        val driveX: Float = x,
+        val driveY: Float = y
+    ) : SystemAction
 
-    /** Poursuite du glisser. */
-    data class DragMove(val x: Float, val y: Float) : SystemAction
+    /** Poursuite du tracé. Voir [DragStart] pour la distinction entre les deux positions. */
+    data class DragMove(
+        val x: Float,
+        val y: Float,
+        val driveX: Float = x,
+        val driveY: Float = y
+    ) : SystemAction
 
     /**
      * Glisser complet, du point de départ au point d'arrivée. Émis au relâchement : le système

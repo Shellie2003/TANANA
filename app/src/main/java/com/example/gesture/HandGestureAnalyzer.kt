@@ -33,6 +33,16 @@ data class HandGestureState(
     val rawCursorX: Float = 0.5f,
     val rawCursorY: Float = 0.5f,
     /**
+     * Centre de la paume, lissé, dans le même espace écran que le curseur.
+     *
+     * Mesure le **déplacement de la main** sans être perturbé par les doigts. Le curseur vient du
+     * bout de l'index, ce qui est juste pour viser ; mais pendant un pincement le pouce vient se
+     * poser sur ce bout d'index, les deux extrémités se confondent dans l'image, et l'estimation
+     * devient bruitée — exactement pendant un défilement, où le gain la multipliait.
+     */
+    val palmX: Float = 0.5f,
+    val palmY: Float = 0.5f,
+    /**
      * Distance pouce-index normalisée par la taille de paume, brute.
      *
      * C'est le seul bouton de l'application. Transmise brute à dessein : c'est
@@ -114,6 +124,21 @@ class HandGestureAnalyzer(
         minCutoff = 1.6f,
         beta = 1.2f,
         predictionMs = CURSOR_PREDICTION_MS
+    )
+
+    /**
+     * Filtre du centre de la paume, **sans prédiction** et plus lissé que le curseur.
+     *
+     * Deux différences, chacune pour une raison. Pas de prédiction : extrapoler sert à compenser la
+     * latence perçue du pointage, alors qu'ici la grandeur utile est un déplacement cumulé — une
+     * extrapolation n'y ajouterait que du dépassement, amplifié par le gain. Plus lissé : la paume
+     * n'a pas à être réactive au pixel, elle a à être stable, et c'est le bruit qui se trouve
+     * multiplié dans un défilement.
+     */
+    private val palmFilter = OneEuroFilter3D(
+        minCutoff = 1.0f,
+        beta = 0.6f,
+        predictionMs = 0f
     )
 
     // Bitmap source réutilisé (jamais transmis à MediaPipe, donc sûr à muter).
@@ -268,6 +293,7 @@ class HandGestureAnalyzer(
     fun setSimulationMode(enabled: Boolean) {
         isSimulationActive = enabled
         cursorFilter.reset()
+        palmFilter.reset()
     }
 
     /**
@@ -295,6 +321,8 @@ class HandGestureAnalyzer(
                 cursorZ = 0.5f,
                 rawCursorX = xNormalized,
                 rawCursorY = yNormalized,
+                palmX = smoothed.x.coerceIn(0f, 1f),
+                palmY = smoothed.y.coerceIn(0f, 1f),
                 pinchRatio = if (isPinching) 0.10f else 0.85f,
                 confidence = 1f,
                 fps = 60,
@@ -453,6 +481,12 @@ class HandGestureAnalyzer(
         val (mappedX, mappedY) = cursorMapper.map(metrics.pointerX, metrics.pointerY)
         val smoothed = cursorFilter.filter(mappedX, mappedY, metrics.depth, now)
 
+        // La paume passe par la même mise à l'échelle que le curseur : les déplacements des deux
+        // sont alors dans la même unité, et le gain du défilement garde la valeur pour laquelle il
+        // a été réglé.
+        val (palmMappedX, palmMappedY) = cursorMapper.map(metrics.palmX, metrics.palmY)
+        val palmSmoothed = palmFilter.filter(palmMappedX, palmMappedY, metrics.depth, now)
+
         listener.onHandGestureUpdated(
             HandGestureState(
                 isHandDetected = true,
@@ -461,6 +495,8 @@ class HandGestureAnalyzer(
                 cursorZ = smoothed.z.coerceIn(0f, 1f),
                 rawCursorX = metrics.pointerX,
                 rawCursorY = metrics.pointerY,
+                palmX = palmSmoothed.x.coerceIn(0f, 1f),
+                palmY = palmSmoothed.y.coerceIn(0f, 1f),
                 pinchRatio = metrics.pinchRatio,
                 confidence = metrics.quality,
                 powerMode = frameGate.mode,
@@ -475,6 +511,7 @@ class HandGestureAnalyzer(
 
     private fun emitNoHand(now: Long) {
         cursorFilter.reset()
+        palmFilter.reset()
 
         // Sans main à suivre, l'état ne varie plus : on limite les publications à 4 Hz au lieu
         // de 30 Hz pour éviter des recompositions inutiles de toute l'interface.

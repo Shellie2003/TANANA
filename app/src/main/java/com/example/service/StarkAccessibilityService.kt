@@ -76,11 +76,12 @@ class StarkAccessibilityService : AccessibilityService() {
                 pendingRecenter = null
                 kinematics = StrokeKinematics(scrollTuning().toConfig())
                 val area = findScrollableArea(action.x, action.y, width, height)
-                val start = kinematics.begin(action.x, action.y, area)
+                val start = kinematics.begin(action.x, action.y, area, action.driveX, action.driveY)
                 strokeBegin(start.x * width, start.y * height)
             }
 
-            is SystemAction.DragMove -> advanceStroke(action.x, action.y, width, height)
+            is SystemAction.DragMove ->
+                advanceStroke(action.x, action.y, action.driveX, action.driveY, width, height)
 
             is SystemAction.Drag -> {
                 pendingRecenter = null
@@ -373,7 +374,14 @@ class StarkAccessibilityService : AccessibilityService() {
      * relevé puis reposé de l'autre côté. C'est ce qui lui évite de se figer — et donc ce qui rend
      * son élan à Android au relâchement. Partout ailleurs, le rapport reste 1:1.
      */
-    private fun advanceStroke(xNorm: Float, yNorm: Float, width: Float, height: Float) {
+    private fun advanceStroke(
+        xNorm: Float,
+        yNorm: Float,
+        driveX: Float,
+        driveY: Float,
+        width: Float,
+        height: Float
+    ) {
         pendingRecenter?.let { (rx, ry) ->
             // La levée précédente n'est pas encore partie : on laisse passer cette image.
             if (streaming) return
@@ -381,7 +389,7 @@ class StarkAccessibilityService : AccessibilityService() {
             strokeBegin(rx * width, ry * height)
         }
 
-        val advance = kinematics.move(xNorm, yNorm)
+        val advance = kinematics.move(xNorm, yNorm, driveX, driveY)
         if (advance.recenter) {
             if (!streaming) return
             strokeEnd()

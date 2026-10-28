@@ -365,7 +365,12 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             x = cursorX,
             y = cursorY,
             pinchRatio = state.pinchRatio,
-            nowMs = now
+            nowMs = now,
+            // Le déplacement de la main se mesure sur la paume, que la fermeture des doigts ne
+            // bouge pas — là où le bout de l'index, dont vient le curseur, est justement l'endroit
+            // que le pouce vient perturber en pinçant.
+            palmX = state.palmX,
+            palmY = state.palmY
         )
         pinchTelemetry = pointer.telemetry()
 
@@ -425,8 +430,10 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         val action = when (event) {
             is PointerEvent.Tap -> SystemAction.Tap(event.x, event.y)
             is PointerEvent.LongPress -> SystemAction.LongPress(event.x, event.y)
-            is PointerEvent.StrokeBegin -> SystemAction.DragStart(event.x, event.y)
-            is PointerEvent.StrokeMove -> SystemAction.DragMove(event.x, event.y)
+            is PointerEvent.StrokeBegin ->
+                SystemAction.DragStart(event.x, event.y, event.driveX, event.driveY)
+            is PointerEvent.StrokeMove ->
+                SystemAction.DragMove(event.x, event.y, event.driveX, event.driveY)
             // Le trajet complet, et non seulement le point d'arrivée : quand la diffusion
             // continue n'est pas disponible, le service d'accessibilité rejoue le glisser d'un
             // bloc, et il lui faut alors les deux extrémités.

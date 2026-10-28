@@ -19,10 +19,33 @@ sealed interface PointerEvent {
     data class LongPress(val x: Float, val y: Float) : PointerEvent
 
     /** Le doigt se pose : début d'un tracé continu. */
-    data class StrokeBegin(val x: Float, val y: Float) : PointerEvent
+    data class StrokeBegin(
+        val x: Float,
+        val y: Float,
+        /** Centre de la paume : origine de la mesure du déplacement. Voir [StrokeMove]. */
+        val driveX: Float,
+        val driveY: Float
+    ) : PointerEvent
 
-    /** Le doigt posé suit la main. */
-    data class StrokeMove(val x: Float, val y: Float) : PointerEvent
+    /**
+     * Le doigt posé suit la main.
+     *
+     * Porte **deux** positions, et la distinction corrige le défilement. [x] et [y] sont le
+     * curseur, issu du bout de l'index : c'est avec lui qu'on vise, donc il pilote la manipulation
+     * directe au rapport 1:1. [driveX] et [driveY] sont le centre de la paume, qui mesure le
+     * déplacement de la main sans être perturbé par les doigts — c'est lui qui pilote le
+     * défilement.
+     *
+     * Le bout de l'index servait aux deux usages, et c'était le défaut : pendant un pincement, le
+     * pouce se pose précisément dessus, les deux extrémités se confondent dans l'image, et
+     * l'estimation devient bruitée exactement pendant un défilement.
+     */
+    data class StrokeMove(
+        val x: Float,
+        val y: Float,
+        val driveX: Float,
+        val driveY: Float
+    ) : PointerEvent
 
     /**
      * Le doigt se lève. Porte le **trajet complet**, et non seulement le point d'arrivée : quand
@@ -145,6 +168,16 @@ class Pointer(
     var cursorY = 0.5f
         private set
 
+    /** Centre de la paume de la dernière image : mesure du déplacement de la main. */
+    var palmX = 0.5f
+        private set
+    var palmY = 0.5f
+        private set
+
+    /** Centre de la paume à l'instant de l'enfoncement, origine du déplacement mesuré. */
+    private var palmAnchorX = 0.5f
+    private var palmAnchorY = 0.5f
+
     /** Vrai tant que le pouce touche l'index. */
     val isPressed: Boolean get() = detector.isPressed
 
@@ -181,6 +214,8 @@ class Pointer(
      * @param x,y position du curseur en coordonnées écran normalisées, déjà filtrée
      * @param pinchRatio écart pouce-index normalisé par la taille de paume
      * @param nowMs horloge monotone
+     * @param palmX,palmY centre de la paume, dans le même espace que le curseur. Sert à mesurer le
+     *   déplacement de la main, que la fermeture des doigts ne perturbe pas.
      */
     fun update(
         handPresent: Boolean,
@@ -188,19 +223,25 @@ class Pointer(
         x: Float,
         y: Float,
         pinchRatio: Float,
-        nowMs: Long
+        nowMs: Long,
+        palmX: Float = x,
+        palmY: Float = y
     ): List<PointerEvent> {
         if (!handPresent || quality < config.minQuality) return onHandLost(nowMs)
 
         lastSeenAt = nowMs
         cursorX = x
         cursorY = y
+        this.palmX = palmX
+        this.palmY = palmY
 
         return when (detector.update(pinchRatio, x, y, nowMs)) {
             PinchDetector.Event.PRESS -> {
                 pressedAt = nowMs
                 phase = Phase.PENDING
                 longPressProgress = 0f
+                palmAnchorX = palmX
+                palmAnchorY = palmY
                 emptyList()
             }
 
@@ -260,9 +301,15 @@ class Pointer(
             return emptyList()
         }
 
-        val travel = hypot(cursorX - detector.anchorX, cursorY - detector.anchorY)
+        // Déplacement mesuré sur la **paume**, et non sur le curseur : c'est la main qui décide si
+        // le geste est un appui ou un tracé, et la paume en est la mesure fidèle. Le bout de
+        // l'index, lui, bouge aussi quand le pouce vient s'y poser — ce qui rendait l'arbitrage
+        // sensible au geste même qui déclenche l'appui.
+        val travel = hypot(palmX - palmAnchorX, palmY - palmAnchorY)
 
-        if (phase == Phase.STROKE) return listOf(PointerEvent.StrokeMove(cursorX, cursorY))
+        if (phase == Phase.STROKE) {
+            return listOf(PointerEvent.StrokeMove(cursorX, cursorY, palmX, palmY))
+        }
 
         if (phase == Phase.PENDING) {
             // Le déplacement l'emporte sur la durée : si la main part, c'est un tracé, même si le
@@ -271,8 +318,10 @@ class Pointer(
                 phase = Phase.STROKE
                 longPressProgress = 0f
                 return listOf(
-                    PointerEvent.StrokeBegin(detector.anchorX, detector.anchorY),
-                    PointerEvent.StrokeMove(cursorX, cursorY)
+                    PointerEvent.StrokeBegin(
+                        detector.anchorX, detector.anchorY, palmAnchorX, palmAnchorY
+                    ),
+                    PointerEvent.StrokeMove(cursorX, cursorY, palmX, palmY)
                 )
             }
 

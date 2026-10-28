@@ -107,6 +107,40 @@ défilement, en balayage, en glisser-déposer — exactement comme il le fait d'
 vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
 Android sait déjà quoi faire d'un doigt.
 
+#### Pourquoi le défilement s'appuie sur la paume, et pas sur l'index
+
+Le curseur vient du bout de l'index, et c'est juste pour **viser** — c'est avec lui qu'on pointe.
+Mais pendant un pincement, le pouce vient se poser précisément sur ce bout d'index : les deux
+extrémités se confondent dans l'image, et l'estimation devient bruitée **exactement pendant qu'un
+pincement est tenu**, donc exactement pendant un défilement. Le gain multipliait alors ce bruit avec
+l'intention.
+
+Le **centre de la paume** — barycentre du poignet et des quatre articulations métacarpiennes — ne
+bouge pas quand les doigts se ferment, et c'est le groupe de points le mieux suivi de la main. Le
+défilement s'appuie donc sur lui : il n'y a plus à maintenir une géométrie de doigts stable en
+déplaçant le bras, seulement à déplacer le bras.
+
+Mesuré en harnais sur un balayage : un bruit de ±2 % sur le signal pilote rendait les pas du
+défilement **2,6 fois plus irréguliers**, et un curseur agité de ±6 % déplace désormais le doigt de
+zéro tant que la paume reste immobile.
+
+Le déplacement qui départage un appui d'un tracé se mesure lui aussi sur la paume : c'est la main
+qui décide, et un curseur qui tremble parce que le pouce s'y est posé ne doit pas transformer un
+appui en glisser.
+
+Deux corrections s'y ajoutent, du même ordre :
+
+- **Le relâchement demande deux images consécutives.** Une seule image de suivi aberrante — un flou
+  de mouvement pendant un balayage — suffisait à faire croire que le pouce s'était rouvert : le
+  tracé se terminait, le défilement s'arrêtait en pleine course, et il fallait repincer alors que
+  le pouce touchait toujours l'index.
+- **L'appui est ancré avant la fermeture.** L'ancre était figée à l'instant du contact, où le pouce
+  est déjà arrivé sur le bout d'index et en déplace l'estimation : l'appui partait quelques
+  millimètres à côté, systématiquement dans la direction d'où venait le pouce. La position retenue
+  est celle d'avant la fermeture — mais seulement si la main était stable, car viser c'est garder
+  la main immobile. Si elle se déplaçait, c'est la position du contact qui sert, pour ne pas
+  introduire de retard.
+
 #### L'appui : ce qui le rendait imprécis et intermittent
 
 Deux défauts distincts, tous deux dans le code et non dans le réglage.
@@ -263,7 +297,7 @@ réellement économisée est affichée dans l'application.
 ## Tests
 
 Les composants de précision, la politique de commande et la régulation de cadence sont couverts
-par 158 tests JVM (exécution en quelques dizaines de
+par 164 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash

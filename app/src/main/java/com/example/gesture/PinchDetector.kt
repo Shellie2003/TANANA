@@ -1,6 +1,7 @@
 package com.example.gesture
 
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * Le pincement : **le seul geste de l'application**.
@@ -135,6 +136,21 @@ class PinchDetector(private val config: Config = Config()) {
         val releaseFraction: Float = 0.50f,
 
         /**
+         * Nombre d'images consécutives au-dessus du seuil avant que le relâchement soit acquis.
+         *
+         * **Corrige un défilement qui s'arrêtait en pleine course.** Une seule image de suivi
+         * aberrante — un flou de mouvement pendant un balayage, une main qui pivote — suffisait à
+         * faire croire que le pouce s'était rouvert. Le tracé se terminait, le défilement
+         * s'arrêtait, et il fallait repincer. Le pouce étant pourtant toujours posé sur l'index,
+         * l'utilisateur n'avait aucune façon de comprendre ce qui venait de se passer.
+         *
+         * Deux images suffisent à écarter le cas : une erreur de suivi est isolée, une main qui
+         * s'ouvre vraiment reste ouverte. Le coût est d'une image de latence au relâchement, soit
+         * environ 33 ms, imperceptible sur un appui.
+         */
+        val releaseFrames: Int = 2,
+
+        /**
          * Intervalle minimal entre deux enfoncements. Le garde-fou est posé sur le **bouton**, et
          * non plus sur l'appui : c'est un anti-rebond du suivi, il n'a donc rien à savoir du sens
          * que prendra le geste.
@@ -163,6 +179,30 @@ class PinchDetector(private val config: Config = Config()) {
 
         /** Nombre d'images d'observation avant que la ligne de base soit jugée fiable. */
         val calibrationFrames: Int = 12,
+
+        /**
+         * Ancienneté de la position retenue comme cible de l'appui, en millisecondes.
+         *
+         * **Corrige l'imprécision résiduelle de l'appui.** L'ancre était figée à l'instant du
+         * contact — or à cet instant le pouce est déjà arrivé sur le bout de l'index, les deux
+         * extrémités se confondent dans l'image, et l'estimation du bout d'index se déplace. On
+         * visait donc une cible, et l'appui partait quelques millimètres à côté, systématiquement
+         * dans la direction d'où venait le pouce.
+         *
+         * La position retenue est celle d'avant la fermeture. Elle ne coûte aucun retard quand on
+         * vise, puisque viser c'est garder la main immobile : voir [anchorSteadyRadius].
+         */
+        val anchorLookbackMs: Long = 90L,
+
+        /**
+         * Déplacement en deçà duquel la main est jugée assez stable pour qu'une position un peu
+         * antérieure fasse une meilleure cible que la position courante.
+         *
+         * Au-delà, la main se déplaçait : la position antérieure serait périmée, et c'est la
+         * position du contact qui est retenue. Le gain de précision est donc pris là où il est
+         * gratuit, et abandonné là où il coûterait du retard.
+         */
+        val anchorSteadyRadius: Float = 0.02f,
 
         /**
          * Déplacement net, sur la fenêtre d'observation, en deçà duquel la main est jugée au repos.
@@ -247,6 +287,15 @@ class PinchDetector(private val config: Config = Config()) {
     private val recentRatios = FloatArray(16) { Float.NaN }
     private var recentIndex = 0
 
+    /** Images consécutives passées au-dessus du seuil de relâchement. */
+    private var releaseStreak = 0
+
+    /** Historique court des positions de curseur, pour ancrer l'appui avant la fermeture. */
+    private val trailX = FloatArray(16)
+    private val trailY = FloatArray(16)
+    private val trailAt = LongArray(16) { Long.MIN_VALUE }
+    private var trailIndex = 0
+
     /** Diagnostic du dernier geste mesuré. */
     var lastAmplitude: Float = 0f
         private set
@@ -289,6 +338,9 @@ class PinchDetector(private val config: Config = Config()) {
         lastRejection = Rejection.NONE
         recentRatios.fill(Float.NaN)
         recentIndex = 0
+        releaseStreak = 0
+        trailAt.fill(Long.MIN_VALUE)
+        trailIndex = 0
     }
 
     /** Remet à zéro les compteurs de session sans perdre la calibration acquise. */
@@ -308,6 +360,7 @@ class PinchDetector(private val config: Config = Config()) {
 
         if (baseline.isNaN()) baseline = pinchRatio.coerceIn(config.baselineMin, config.baselineMax)
         if (observedFrames < config.calibrationFrames) observedFrames++
+        if (!isPressed) recordTrail(cursorX, cursorY, nowMs)
 
         // Contact établi : la ligne de base est gelée. Sans ce gel, un appui prolongé ferait
         // converger la référence vers la valeur fermée, et le geste suivant serait mesuré contre
@@ -386,6 +439,47 @@ class PinchDetector(private val config: Config = Config()) {
         return abs(ratio - oldest) < config.restNetMovement
     }
 
+    private fun recordTrail(x: Float, y: Float, nowMs: Long) {
+        trailX[trailIndex] = x
+        trailY[trailIndex] = y
+        trailAt[trailIndex] = nowMs
+        trailIndex = (trailIndex + 1) % trailX.size
+    }
+
+    /**
+     * Cible de l'appui : la position d'avant la fermeture quand la main était stable, celle du
+     * contact sinon.
+     *
+     * La condition de stabilité est ce qui rend l'échange gratuit. Viser, c'est garder la main
+     * immobile ; si elle l'était, une position un peu antérieure désigne le même endroit tout en
+     * échappant au déplacement que le pouce arrivant provoque sur l'estimation du bout d'index. Si
+     * la main se déplaçait, en revanche, l'utilisateur ne visait pas encore, et une position
+     * antérieure serait simplement périmée.
+     */
+    private fun steadyAnchor(cursorX: Float, cursorY: Float, nowMs: Long): Pair<Float, Float> {
+        var bestX = cursorX
+        var bestY = cursorY
+        var bestAge = -1L
+
+        for (i in trailAt.indices) {
+            val at = trailAt[i]
+            if (at == Long.MIN_VALUE) continue
+            val age = nowMs - at
+            if (age < config.anchorLookbackMs) continue
+            // La plus récente des positions assez anciennes : au-delà, on perdrait en fraîcheur
+            // sans rien gagner en stabilité.
+            if (bestAge == -1L || age < bestAge) {
+                bestAge = age
+                bestX = trailX[i]
+                bestY = trailY[i]
+            }
+        }
+
+        if (bestAge == -1L) return cursorX to cursorY
+        val drift = hypot(bestX - cursorX, bestY - cursorY)
+        return if (drift <= config.anchorSteadyRadius) bestX to bestY else cursorX to cursorY
+    }
+
     private fun record(ratio: Float) {
         recentRatios[recentIndex] = ratio
         recentIndex = (recentIndex + 1) % recentRatios.size
@@ -416,14 +510,16 @@ class PinchDetector(private val config: Config = Config()) {
         isPressed = true
         attemptPending = false
         peakProgress = 0f
+        releaseStreak = 0
         contactBaseline = baseline
         contactMin = ratio
         lastAmplitude = amplitude
         lastCloseDurationMs = duration
         lastRejection = Rejection.NONE
         lastPressAt = nowMs
-        anchorX = cursorX
-        anchorY = cursorY
+        val (ax, ay) = steadyAnchor(cursorX, cursorY, nowMs)
+        anchorX = ax
+        anchorY = ay
         pressCount++
         return Event.PRESS
     }
@@ -435,8 +531,18 @@ class PinchDetector(private val config: Config = Config()) {
         // Relâchement anticipé : une fraction du chemin de retour suffit. Attendre l'ouverture
         // complète n'apporte aucune certitude supplémentaire et ne fait que retarder le geste.
         val releaseAt = contactMin + (contactBaseline - contactMin) * config.releaseFraction
-        if (ratio <= releaseAt) return Event.NONE
+        if (ratio <= releaseAt) {
+            releaseStreak = 0
+            return Event.NONE
+        }
 
+        // Anti-décrochage : une image isolée au-dessus du seuil est une erreur de suivi, pas une
+        // main qui s'ouvre. Sans ce compte, un flou de mouvement en pleine course mettait fin au
+        // tracé, et le défilement s'arrêtait alors que le pouce touchait toujours l'index.
+        releaseStreak++
+        if (releaseStreak < config.releaseFrames) return Event.NONE
+
+        releaseStreak = 0
         isPressed = false
         travelProgress = 0f
         endAttempt()

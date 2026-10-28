@@ -48,7 +48,9 @@ object HandLandmarks {
  *
  * Ne subsistent que les deux mesures dont la fiabilité est établie :
  *
- *  - **la position** ([pointerX], [pointerY]), qui pilote le curseur ;
+ *  - **la position** ([pointerX], [pointerY]), qui pilote le curseur, et le centre de la paume
+ *    ([palmX], [palmY]), qui mesure le déplacement de la main sans se laisser perturber par les
+ *    doigts ;
  *  - **l'écart pouce-index** ([pinchRatio]), qui est le seul bouton de l'application.
  *
  * Ce ne sont pas les deux plus commodes, ce sont les deux plus robustes. L'extension d'un doigt
@@ -69,6 +71,21 @@ data class HandMetrics(
     /** Position d'ancrage du curseur (bout d'index stabilisé). */
     val pointerX: Float,
     val pointerY: Float,
+    /**
+     * Centre de la paume : le point de la main que le pincement ne déplace **pas**.
+     *
+     * C'est la mesure qui manquait. Le curseur vient du bout de l'index, ce qui est juste pour
+     * viser — c'est avec lui qu'on pointe. Mais pendant un pincement, le pouce vient se poser sur
+     * ce même bout d'index : les deux extrémités se confondent dans l'image, et l'estimation du
+     * bout d'index devient bruitée **précisément quand le pincement est tenu**, donc précisément
+     * pendant un défilement. Le gain du défilement multipliait alors ce bruit avec l'intention.
+     *
+     * La paume, elle, ne bouge pas quand les doigts se ferment, et c'est le groupe de points le
+     * mieux suivi de la main. Le défilement s'appuie donc sur elle : il n'y a plus à maintenir une
+     * géométrie de doigts stable en déplaçant le bras, seulement à déplacer le bras.
+     */
+    val palmX: Float,
+    val palmY: Float,
     /** Profondeur estimée : 0 = main proche de la caméra, 1 = main éloignée. */
     val depth: Float,
     /** Plausibilité de la détection (0..1) : écarte le bruit et les objets pris pour des mains. */
@@ -149,6 +166,28 @@ object HandGeometry {
     }
 
     /**
+     * Centre de la paume : barycentre du poignet et des quatre articulations métacarpiennes.
+     *
+     * Cinq points, et aucun d'eux ne bouge quand les doigts se ferment. C'est ce qui en fait la
+     * mesure de référence d'un **déplacement de main**, là où le bout d'un doigt mêle le
+     * déplacement de la main et le mouvement du doigt.
+     */
+    fun palmAnchor(lm: List<Landmark>): Pair<Float, Float> {
+        var x = lm[HandLandmarks.WRIST].x
+        var y = lm[HandLandmarks.WRIST].y
+        for (index in intArrayOf(
+            HandLandmarks.INDEX_MCP,
+            HandLandmarks.MIDDLE_MCP,
+            HandLandmarks.RING_MCP,
+            HandLandmarks.PINKY_MCP
+        )) {
+            x += lm[index].x
+            y += lm[index].y
+        }
+        return Pair(x / 5f, y / 5f)
+    }
+
+    /**
      * Profondeur normalisée déduite de la taille apparente de la paume.
      * 0 = main collée à l'objectif, 1 = main au fond du champ.
      */
@@ -164,12 +203,15 @@ object HandGeometry {
 
         val palmScale = palmScale(lm)
         val (px, py) = pointerAnchor(lm)
+        val (cx, cy) = palmAnchor(lm)
 
         return HandMetrics(
             palmScale = palmScale,
             pinchRatio = distance(lm[HandLandmarks.THUMB_TIP], lm[HandLandmarks.INDEX_TIP]) / palmScale,
             pointerX = px,
             pointerY = py,
+            palmX = cx,
+            palmY = cy,
             depth = depth(palmScale),
             quality = quality(lm, palmScale)
         )

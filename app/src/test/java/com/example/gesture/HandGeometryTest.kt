@@ -62,6 +62,33 @@ class HandGeometryTest {
         assertTrue("far=${far.depth} near=${near.depth}", far.depth > near.depth)
     }
 
+    /**
+     * Propriété centrale de la mesure qui pilote le défilement : **le centre de la paume ne doit
+     * pas bouger quand les doigts se ferment.** Le bout de l'index, lui, est précisément l'endroit
+     * où le pouce vient se poser, ce qui le rend bruité pendant un pincement — donc pendant un
+     * défilement, où le gain multipliait ce bruit.
+     */
+    @Test
+    fun `le centre de la paume ne bouge pas quand les doigts se ferment`() {
+        val ouverte = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(1f, 1f, 1f, 1f), pinchDistance = 0.9f)
+        )
+        val pincee = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(1f, 0f, 0f, 0f), pinchDistance = 0.08f)
+        )
+
+        assertEquals("la paume a bougé en X", ouverte.palmX, pincee.palmX, 1e-4f)
+        assertEquals("la paume a bougé en Y", ouverte.palmY, pincee.palmY, 1e-4f)
+    }
+
+    /** À l'inverse, la paume suit fidèlement un déplacement de la main. */
+    @Test
+    fun `le centre de la paume suit le deplacement de la main`() {
+        val gauche = SyntheticHand.metrics(SyntheticHand.build(cx = 0.3f))
+        val droite = SyntheticHand.metrics(SyntheticHand.build(cx = 0.7f))
+        assertEquals(0.4f, droite.palmX - gauche.palmX, 1e-3f)
+    }
+
     @Test
     fun `l ancre du curseur suit la main`() {
         val gauche = SyntheticHand.metrics(SyntheticHand.build(cx = 0.25f))

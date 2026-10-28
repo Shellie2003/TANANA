@@ -153,13 +153,20 @@ class StrokeKinematics(private val config: Config = Config()) {
      *
      * @param area zone défilable sous le point de départ, ou null si le système n'en signale
      *   aucune — auquel cas le tracé reste en rapport 1:1
+     * @param driveX,driveY centre de la paume, origine de la mesure du déplacement
      * @return la position où poser le doigt
      */
-    fun begin(cursorX: Float, cursorY: Float, area: Area? = null): Advance {
+    fun begin(
+        cursorX: Float,
+        cursorY: Float,
+        area: Area? = null,
+        driveX: Float = cursorX,
+        driveY: Float = cursorY
+    ): Advance {
         this.area = area
         mode = if (area == null) Mode.DIRECT else Mode.SCROLL
-        lastCursorX = cursorX
-        lastCursorY = cursorY
+        lastCursorX = driveX
+        lastCursorY = driveY
         cursorTravel = 0f
         travelSincePress = 0f
         lastDirX = 0f
@@ -178,21 +185,41 @@ class StrokeKinematics(private val config: Config = Config()) {
         return Advance(fingerX, fingerY)
     }
 
-    /** Avance le doigt pour la position de curseur courante. */
-    fun move(cursorX: Float, cursorY: Float): Advance {
+    /**
+     * Avance le doigt d'une image.
+     *
+     * Deux positions, et la distinction est le fond de la correction du défilement :
+     *
+     *  - **[cursorX], [cursorY]** — le curseur, issu du bout de l'index. C'est avec lui qu'on
+     *    **vise**, donc c'est lui qui pilote la manipulation directe, au rapport 1:1.
+     *  - **[driveX], [driveY]** — le centre de la paume. C'est lui qui mesure le **déplacement de
+     *    la main**, et c'est lui qui pilote le défilement.
+     *
+     * Le bout de l'index était utilisé pour les deux, et c'était le défaut : pendant un pincement,
+     * le pouce vient se poser précisément sur ce bout d'index, les deux extrémités se confondent
+     * dans l'image, et l'estimation devient bruitée — exactement pendant un défilement, et le gain
+     * multipliait ce bruit avec l'intention. La paume, elle, ne bouge pas quand les doigts se
+     * ferment.
+     */
+    fun move(
+        cursorX: Float,
+        cursorY: Float,
+        driveX: Float = cursorX,
+        driveY: Float = cursorY
+    ): Advance {
         val area = this.area
         if (area == null) {
             fingerX = cursorX
             fingerY = cursorY
-            lastCursorX = cursorX
-            lastCursorY = cursorY
+            lastCursorX = driveX
+            lastCursorY = driveY
             return Advance(cursorX, cursorY)
         }
 
-        var dx = (cursorX - lastCursorX).coerceIn(-config.maxCursorStep, config.maxCursorStep)
-        var dy = (cursorY - lastCursorY).coerceIn(-config.maxCursorStep, config.maxCursorStep)
-        lastCursorX = cursorX
-        lastCursorY = cursorY
+        var dx = (driveX - lastCursorX).coerceIn(-config.maxCursorStep, config.maxCursorStep)
+        var dy = (driveY - lastCursorY).coerceIn(-config.maxCursorStep, config.maxCursorStep)
+        lastCursorX = driveX
+        lastCursorY = driveY
 
         cursorTravel += hypot(dx, dy)
         val gain = gainAt(cursorTravel)
