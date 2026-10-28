@@ -265,8 +265,39 @@ class StarkAccessibilityService : AccessibilityService() {
      * pas bornée par construction, et une pile d'appels ne doit pas dépendre de ce qu'affiche
      * l'application au premier plan.
      */
-    private fun collectTargets(): List<TargetSnapper.Target> {
+    /**
+     * Cibles interactives au **voisinage** d'un point.
+     *
+     * ## Pourquoi un voisinage, et non l'écran entier
+     *
+     * Cette méthode énumérait toutes les cibles cliquables de l'écran — jusqu'à 400 nœuds visités —
+     * pour que l'appelant n'en retienne ensuite que celles situées dans un rayon de 6 % de l'écran.
+     * Tout le reste du parcours était jeté.
+     *
+     * Ce n'était pas qu'un gaspillage. Chaque nœud d'accessibilité se lit par un **appel
+     * interprocessus**, et le parcours a lieu sur le **thread principal**, à l'instant précis où
+     * l'utilisateur appuie. Sur une liste longue, la somme de ces appels est une saccade visible,
+     * déclenchée par le geste lui-même — exactement le « ça rame » le plus exaspérant, puisqu'il
+     * frappe au moment où l'on attend une réponse.
+     *
+     * L'élagage est géométrique et sûr : on ne descend que dans les nœuds dont les limites
+     * rencontrent la zone cherchée. Les limites d'un enfant sont contenues dans celles de son
+     * parent, aux débordements près — d'où la marge appliquée à la zone de test, qui évite de
+     * perdre une cible dont le parent est rapporté légèrement trop petit.
+     */
+    private fun collectTargets(
+        centerX: Float,
+        centerY: Float,
+        radius: Float
+    ): List<TargetSnapper.Target> {
         val root = runCatching { rootInActiveWindow }.getOrNull() ?: return emptyList()
+
+        // Zone de recherche, élargie d'une marge pour absorber les limites approximatives.
+        val margin = radius * PRUNE_MARGIN
+        val searchLeft = centerX - radius - margin
+        val searchTop = centerY - radius - margin
+        val searchRight = centerX + radius + margin
+        val searchBottom = centerY + radius + margin
 
         val targets = ArrayList<TargetSnapper.Target>(MAX_TARGETS)
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
@@ -278,8 +309,15 @@ class StarkAccessibilityService : AccessibilityService() {
             val (node, depth) = queue.removeFirst()
             visited++
 
+            node.getBoundsInScreen(bounds)
+            // Hors de la zone cherchée : ni le nœud ni sa descendance ne peuvent y contribuer.
+            if (bounds.right < searchLeft || bounds.left > searchRight ||
+                bounds.bottom < searchTop || bounds.top > searchBottom
+            ) {
+                continue
+            }
+
             if (node.isClickable && node.isVisibleToUser && node.isEnabled) {
-                node.getBoundsInScreen(bounds)
                 targets += TargetSnapper.Target(
                     bounds.left.toFloat(), bounds.top.toFloat(),
                     bounds.right.toFloat(), bounds.bottom.toFloat()
@@ -430,27 +468,35 @@ class StarkAccessibilityService : AccessibilityService() {
 
         // Parcours en largeur : la profondeur croît, donc la dernière correspondance trouvée est
         // la plus imbriquée — une liste dans une page, et non la page entière.
+        //
+        // Et **on ne descend que dans ce qui contient le point** : la zone cherchée est un point
+        // unique, donc tout nœud qui ne le contient pas a une descendance qui ne le contient pas
+        // non plus. L'élagage ramène un parcours de plusieurs centaines de nœuds — chacun un appel
+        // interprocessus, sur le thread principal, au début du geste — à la profondeur de la
+        // hiérarchie.
         while (queue.isNotEmpty() && visited < MAX_NODES) {
             val (node, depth) = queue.removeFirst()
             visited++
 
+            node.getBoundsInScreen(bounds)
+            val containsPoint =
+                x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom
+            if (!containsPoint) continue
+
             if (node.isScrollable && node.isVisibleToUser) {
-                node.getBoundsInScreen(bounds)
-                if (x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom) {
-                    val w = (bounds.right - bounds.left).toFloat()
-                    val h = (bounds.bottom - bounds.top).toFloat()
-                    // Une zone minuscule ne laisserait pas de course utile : le doigt y serait
-                    // repositionné à chaque image, ce qui hacherait le défilement.
-                    if (w >= width * MIN_SCROLL_AREA && h >= height * MIN_SCROLL_AREA) {
-                        best = StrokeKinematics.Area(
-                            left = bounds.left / width,
-                            top = bounds.top / height,
-                            right = bounds.right / width,
-                            bottom = bounds.bottom / height,
-                            horizontal = scrollsHorizontally(node, w, h),
-                            vertical = scrollsVertically(node, w, h)
-                        )
-                    }
+                val w = (bounds.right - bounds.left).toFloat()
+                val h = (bounds.bottom - bounds.top).toFloat()
+                // Une zone minuscule ne laisserait pas de course utile : le doigt y serait
+                // repositionné à chaque image, ce qui hacherait le défilement.
+                if (w >= width * MIN_SCROLL_AREA && h >= height * MIN_SCROLL_AREA) {
+                    best = StrokeKinematics.Area(
+                        left = bounds.left / width,
+                        top = bounds.top / height,
+                        right = bounds.right / width,
+                        bottom = bounds.bottom / height,
+                        horizontal = scrollsHorizontally(node, w, h),
+                        vertical = scrollsVertically(node, w, h)
+                    )
                 }
             }
 
@@ -673,6 +719,15 @@ class StarkAccessibilityService : AccessibilityService() {
          */
         private const val MIN_SCROLL_AREA = 0.25f
 
+        /**
+         * Marge, en fraction du rayon, dont la zone de recherche est élargie avant l'élagage.
+         *
+         * Les limites d'un enfant sont contenues dans celles de son parent, aux débordements près :
+         * un conteneur dont les limites sont rapportées légèrement trop petites ferait perdre ses
+         * enfants. La marge rend l'élagage sûr au prix de quelques nœuds de plus.
+         */
+        private const val PRUNE_MARGIN = 0.5f
+
         @Volatile
         var instance: StarkAccessibilityService? = null
             private set
@@ -711,14 +766,21 @@ class StarkAccessibilityService : AccessibilityService() {
             val service = instance ?: return null
             if (screenWidth <= 0f || screenHeight <= 0f) return null
 
+            val radius = TargetSnapper.defaultRadius(screenWidth, screenHeight)
+            val px = xNorm * screenWidth
+            val py = yNorm * screenHeight
+
+            // Seules les cibles du voisinage sont collectées : l'aimantation n'en retient de toute
+            // façon aucune au-delà du rayon, et le parcours de l'arbre a lieu sur le thread
+            // principal, au moment de l'appui.
             val targets = TargetSnapper.usable(
-                service.collectTargets(), screenWidth, screenHeight
+                service.collectTargets(px, py, radius), screenWidth, screenHeight
             )
             val snapped = TargetSnapper.snap(
-                x = xNorm * screenWidth,
-                y = yNorm * screenHeight,
+                x = px,
+                y = py,
                 targets = targets,
-                radius = TargetSnapper.defaultRadius(screenWidth, screenHeight)
+                radius = radius
             ) ?: return null
 
             return TargetSnapper.Snap(

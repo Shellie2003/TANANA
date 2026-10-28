@@ -83,6 +83,18 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private var pointer = Pointer()
     private val panel = CommandPanel()
     private var commands = CommandList()
+
+    /**
+     * Libellés du panneau, calculés une fois par changement de configuration.
+     *
+     * `commands.labels()` allouait une liste à **chaque image**, pour un contenu qui ne change
+     * qu'au réglage. Trente listes par seconde dont rien ne diffère : invisible à la lecture,
+     * mais c'est la somme de ce genre de détails qui finit par se voir.
+     */
+    private var commandLabels: List<String> = commands.labels()
+
+    /** Dernière publication de la télémétrie : elle n'est lue qu'à 5 Hz par l'écran. */
+    private var telemetryAt = 0L
     private val keyboard = RadialKeyboard()
     private var keyboardOpen = false
     private lateinit var bindingsStore: BindingsStore
@@ -338,6 +350,7 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     /** Relit les préférences et les applique à la politique de commande. */
     private fun applyPreferences() {
         commands = bindingsStore.loadCommands()
+        commandLabels = commands.labels()
         pointer = Pointer(detector = PinchDetector(bindingsStore.loadClickTuning().toConfig()))
         panel.reset()
     }
@@ -372,7 +385,12 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             palmX = state.palmX,
             palmY = state.palmY
         )
-        pinchTelemetry = pointer.telemetry()
+        // L'écran ne lit cette mesure qu'à 5 Hz : la recalculer à chaque image allouerait trente
+        // objets par seconde dont vingt-cinq ne seraient jamais lus.
+        if (now - telemetryAt >= TELEMETRY_INTERVAL_MS) {
+            telemetryAt = now
+            pinchTelemetry = pointer.telemetry()
+        }
 
         // Le panneau suit la position de la main : il n'a pas de bascule, donc rien à
         // synchroniser, et on ne peut pas y rester coincé. Il reste fermé pendant la saisie, où
@@ -391,7 +409,15 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             longPressProgress = pointer.longPressProgress,
             visible = state.isHandDetected
         )
-        overlayView?.setPanel(if (keyboardOpen) null else panel.state(commands.labels()))
+        // Panneau entièrement fermé et sans aperçu : rien à transmettre. C'est le cas courant —
+        // la main n'est pas près du bord droit — et il évite d'allouer un état et d'en comparer
+        // les libellés à chaque image.
+        val panelState = when {
+            keyboardOpen -> null
+            panel.isOpen -> panel.state(commandLabels)
+            else -> panel.state(commandLabels).takeIf { it.openProgress > 0f }
+        }
+        overlayView?.setPanel(panelState)
 
         when {
             keyboardOpen -> routeToKeyboard(events, now)
@@ -550,6 +576,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         private const val TAG = "StarkVisionService"
         private const val CHANNEL_ID = "stark_vision"
         private const val NOTIFICATION_ID = 42
+
+        /** Période de publication de la télémétrie du pincement, en millisecondes. */
+        private const val TELEMETRY_INTERVAL_MS = 150L
 
         private const val ANALYSIS_WIDTH = 640
         private const val ANALYSIS_HEIGHT = 480

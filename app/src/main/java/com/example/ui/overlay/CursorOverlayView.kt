@@ -12,6 +12,7 @@ import com.example.control.TargetSnapper
 import com.example.input.CommandPanel
 import com.example.input.RadialKeyboard
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -124,17 +125,33 @@ class CursorOverlayView(context: Context) : View(context) {
         visible: Boolean
     ) {
         // Une fenêtre de superposition invalidée en continu fait recomposer tout l'écran par le
-        // compositeur, y compris l'application au premier plan. Quand le curseur est masqué et
-        // le reste inchangé, ne rien redessiner est une économie directe de GPU.
-        val unchanged = !visible && !this.visible && !tapVisible()
+        // compositeur, y compris l'application au premier plan. Ne redessiner que sur un
+        // changement **perceptible** est donc une économie directe de GPU — et elle tombe au bon
+        // endroit, puisque le cas le plus fréquent est une main qui vise, donc immobile.
+        //
+        // Le seuil est d'un demi-pixel : en deçà, aucun pixel ne changerait de valeur, et
+        // l'invalidation ferait travailler le compositeur pour une image identique. C'est aussi un
+        // gain de précision indirect : moins de contention sur le GPU, donc un affichage plus
+        // régulier à l'instant où l'on vise.
+        val moved = abs(x - cursorX) * width > 0.5f || abs(y - cursorY) * height > 0.5f
+        val changed = moved ||
+            visible != this.visible ||
+            pressed != this.pressed ||
+            abs(pinchProgress - this.pinchProgress) > PROGRESS_EPSILON ||
+            abs(longPressProgress - this.longPressProgress) > PROGRESS_EPSILON
+
         this.cursorX = x
         this.cursorY = y
         this.pressed = pressed
         this.pinchProgress = pinchProgress
         this.longPressProgress = longPressProgress
         this.visible = visible
-        if (unchanged) return
 
+        if (!changed && !tapVisible()) return
+        if (!visible && !tapVisible()) return
+
+        // L'anneau tourne : il ne doit avancer que sur les images réellement dessinées, sans quoi
+        // sa vitesse dépendrait du nombre d'images économisées.
         rotation = (rotation + 2f) % 360f
         invalidate()
     }
@@ -492,6 +509,12 @@ class CursorOverlayView(context: Context) : View(context) {
          * expression lue à chaque image.
          */
         const val TAP_RIPPLE_MS = 320L
+
+        /**
+         * Variation de progression en deçà de laquelle un anneau n'a pas visiblement bougé. Un
+         * demi-degré d'arc : rien qu'un œil puisse voir, et une image entière économisée.
+         */
+        const val PROGRESS_EPSILON = 1f / 720f
 
         /**
          * Nombre de secteurs de la couronne. Le clavier et la roue en comptent huit : c'est le

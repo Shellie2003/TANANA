@@ -107,6 +107,39 @@ défilement, en balayage, en glisser-déposer — exactement comme il le fait d'
 vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
 Android sait déjà quoi faire d'un doigt.
 
+#### La précision du curseur : ce que la mesure a contredit
+
+Le soupçon naturel était le filtrage, ou l'amplification de la zone active. Les deux étaient faux.
+La mesure en harnais — tremblement physiologique à 10 Hz plus bruit d'estimation, bruit résiduel
+exprimé en pixels d'écran — a désigné la **prédiction de latence**.
+
+Prédire, c'est extrapoler le long de la vitesse, et la vitesse est une **dérivée** du signal.
+Dériver amplifie le bruit, et le résultat est réinjecté dans la position. Au repos, la « vitesse »
+n'est donc que du bruit dérivé, et la prédiction le recopiait dans le curseur : elle **doublait**
+le bruit résiduel en visée.
+
+Or la prédiction ne sert qu'à compenser une latence perçue, laquelle n'existe qu'en mouvement : un
+curseur immobile n'est jamais en retard. Elle est donc **coupée en visée** et pleine en mouvement.
+Ce n'est pas un compromis mais une correction — les deux grandeurs s'améliorent ensemble :
+
+| Réglage | Bruit en visée | Réponse à un départ |
+|---|---|---|
+| avant | 1,34 px | 99 ms |
+| prédiction coupée en visée | 0,62 px | 99 ms |
+| **+ filtre relissé (0,4 Hz, beta 3,5)** | **0,22 px** | **66 ms** |
+
+Soit **six fois moins de bruit** et un tiers de réponse en moins. Le relissage mérite un mot : une
+coupure plus basse *et* un `beta` plus fort donnent les deux à la fois, alors qu'à `beta` constant
+les deux s'opposent. C'est en relevant `beta` que le compromis se dissout, puisque la coupure
+remonte alors d'autant plus vite que la main part.
+
+Les valeurs absolues dépendent du modèle de bruit injecté ; c'est le rapport entre les lignes qui
+est le résultat.
+
+Reste une limite qu'aucun filtre ne franchit : le tremblement physiologique de la main tendue
+couvre plusieurs millimètres à l'écran. C'est pourquoi l'aimantation vers les objets existe — viser
+des objets plutôt que des pixels est la seule façon de dépasser la physiologie.
+
 #### Pourquoi le défilement s'appuie sur la paume, et pas sur l'index
 
 Le curseur vient du bout de l'index, et c'est juste pour **viser** — c'est avec lui qu'on pointe.
@@ -282,7 +315,35 @@ application Android puisse avoir. Trois mécanismes réduisent la facture, du pl
 |---|---|
 | Caméra déliée quand l'écran s'éteint | éteint capteur et processeur d'image, pas seulement l'analyse |
 | Régulation de cadence (`FrameGate`) | analyse à 2,5 img/s au repos au lieu de 30 |
-| Superposition non redessinée à vide | évite de faire recomposer l'écran entier par le compositeur |
+| Images de caméra réutilisées | supprime ~36 Mo/s d'allocation, donc les pauses de ramasse-miettes |
+| Parcours d'accessibilité élagués | quelques nœuds au lieu de 400, au moment précis de l'appui |
+| Superposition redessinée sur changement seul | n'invalide plus quand la main vise, donc immobile |
+
+### Les trois saccades, et leur cause
+
+Chacune avait une cause mesurable, et aucune n'était un problème de réglage.
+
+**L'allocation d'une image par frame.** `Bitmap.createBitmap(source, …, matrix, true)` allouait une
+image entière à chaque frame — 640 × 480 × 4 octets, trente fois par seconde, soit environ
+**36 Mo/s** à ramasser. La pause de ramasse-miettes qui s'ensuit est exactement ce qu'on ressent
+comme « ça rame », et elle est provoquée par le flux de la caméra lui-même. Les images de
+destination sont désormais réutilisées à tour de rôle et dessinées au canevas. Trois suffisent :
+le mode LIVE_STREAM ne traite qu'une inférence à la fois, de sorte qu'au moment de réécrire une
+image on en a publié deux autres depuis.
+
+**Les parcours de l'arbre d'accessibilité.** Les deux parcours énuméraient tout l'écran — jusqu'à
+400 nœuds — pour que l'appelant n'en retienne ensuite que le voisinage du point visé. Or chaque
+nœud se lit par un **appel interprocessus**, et le parcours a lieu sur le **thread principal**, à
+l'instant où l'utilisateur appuie : la saccade frappait donc au moment où l'on attend une réponse.
+L'élagage est géométrique — on ne descend que dans les nœuds dont les limites rencontrent la zone
+cherchée — et sûr, à une marge près qui absorbe les limites approximatives.
+
+**Le redessin perpétuel de la superposition.** Elle invalidait à chaque image même main immobile,
+ce qui fait recomposer tout l'écran, application au premier plan comprise — pour un anneau
+décoratif qui tourne. Elle ne redessine plus que sur un changement perceptible : un demi-pixel de
+déplacement, ou un demi-degré d'arc. Conséquence visible : l'anneau se **fige** quand la main est
+parfaitement stable. C'est voulu, et c'est même un retour utile — il signale que la visée est
+verrouillée.
 
 Le compromis est **asymétrique et délibéré** : on accepte de réagir plus lentement quand rien ne
 se passe, jamais quand quelque chose se passe. Détecter l'arrivée d'une main avec 400 ms de retard
@@ -297,7 +358,7 @@ réellement économisée est affichée dans l'application.
 ## Tests
 
 Les composants de précision, la politique de commande et la régulation de cadence sont couverts
-par 164 tests JVM (exécution en quelques dizaines de
+par 166 tests JVM (exécution en quelques dizaines de
 millisecondes, sans appareil) :
 
 ```bash

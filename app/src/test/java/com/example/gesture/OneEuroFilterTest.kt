@@ -83,6 +83,69 @@ class OneEuroFilterTest {
     }
 
     /**
+     * **La correction qui a le plus d'effet sur la précision.** La prédiction extrapole le long de
+     * la vitesse, et la vitesse est une **dérivée** du signal : dériver amplifie le bruit, et le
+     * résultat est réinjecté dans la position. Au repos, la « vitesse » n'est donc que du bruit
+     * dérivé, et la prédiction le recopiait dans le curseur — elle **doublait** le bruit résiduel
+     * en visée.
+     *
+     * Or prédire ne sert qu'à compenser une latence perçue, laquelle n'existe qu'en mouvement : un
+     * curseur immobile n'est jamais en retard. La couper en visée ne coûte donc rien.
+     */
+    @Test
+    fun `la prediction est coupee quand la main vise`() {
+        /**
+         * Bruit résiduel du curseur, main visant un point fixe.
+         *
+         * Le signal injecté comporte un **tremblement physiologique à 10 Hz** en plus du bruit
+         * d'estimation, et c'est indispensable : un premier test n'injectait que du bruit blanc,
+         * dont la dérivée filtrée reste si faible que la prédiction ne s'y déclenchait pas. Il ne
+         * mesurait donc rien, et passait quelle que soit la coupure. C'est le tremblement, signal
+         * cohérent, qui donne à la dérivée de quoi s'exprimer.
+         */
+        fun jitter(minSpeed: Float): Float {
+            val filter = OneEuroFilter(
+                minCutoff = 0.4f, beta = 3.5f, dCutoff = 1.0f, predictionMs = 40f,
+                predictionMinSpeed = minSpeed, predictionFullSpeed = 0.20f
+            )
+            val random = java.util.Random(7)
+            var t = 0L
+            val samples = mutableListOf<Float>()
+            repeat(140) { i ->
+                t += FRAME_MS
+                val tremor = 0.004f * kotlin.math.sin(i * 2.0 * Math.PI * 10.0 / 30.0).toFloat()
+                val white = (random.nextFloat() - 0.5f) * 0.004f
+                val out = filter.filter(0.5f + tremor + white, t)
+                if (i > 40) samples += out
+            }
+            val mean = samples.average().toFloat()
+            return kotlin.math.sqrt(samples.map { (it - mean) * (it - mean) }.average().toFloat())
+        }
+
+        val gated = jitter(minSpeed = 0.04f)
+        // Coupure désarmée : la prédiction agit dès la moindre vitesse, bruit compris.
+        val ungated = jitter(minSpeed = -1f)
+        assertTrue(
+            "la coupure n'apporte rien : bruit $gated contre $ungated sans elle",
+            gated < ungated * 0.75f
+        )
+    }
+
+    /**
+     * Symétriquement, la prédiction doit continuer d'agir en mouvement établi : c'est là qu'elle
+     * sert, et la couper partout rendrait le curseur traînant.
+     */
+    @Test
+    fun `la prediction agit toujours en mouvement etabli`() {
+        val lagWith = rampLag(predictionMs = 40f)
+        val lagWithout = rampLag(predictionMs = 0f)
+        assertTrue(
+            "la coupure a aussi désarmé la prédiction en mouvement : $lagWith contre $lagWithout",
+            lagWith < lagWithout * 0.8f
+        )
+    }
+
+    /**
      * L'amortissement à la décélération évite que le curseur ne dépasse la cible quand la main
      * s'immobilise — l'instant précis où l'utilisateur vise.
      */

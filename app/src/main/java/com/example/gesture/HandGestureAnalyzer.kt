@@ -2,7 +2,9 @@ package com.example.gesture
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.os.Build
 import android.os.SystemClock
 import android.system.Os
@@ -105,6 +107,9 @@ class HandGestureAnalyzer(
 
         /** Nombre d'erreurs d'inférence consécutives avant de rétrograder le delegate GPU. */
         const val GPU_FAILURE_THRESHOLD = 5
+
+        /** Images de destination réutilisées à tour de rôle. Voir [rotatedPool]. */
+        const val ROTATED_POOL_SIZE = 3
     }
 
     private var landmarker: HandLandmarker? = null
@@ -120,9 +125,18 @@ class HandGestureAnalyzer(
     private var consecutiveInferenceErrors = 0
 
     private val cursorMapper = CursorMapper()
+    /**
+     * Filtre du curseur. Les deux coefficients sont issus d'une mesure, pas d'une intuition.
+     *
+     * Une coupure plus basse au repos et un `beta` plus fort donnent **à la fois** moins de bruit
+     * en visée et une réponse plus rapide au départ : 0,95 pixel et 66 ms contre 1,34 pixel et
+     * 99 ms pour le réglage précédent. Les deux grandeurs semblaient s'opposer, et elles
+     * s'opposent effectivement à `beta` constant — c'est en le relevant que le compromis se
+     * dissout, puisque la coupure remonte alors d'autant plus vite que la main part.
+     */
     private val cursorFilter = OneEuroFilter3D(
-        minCutoff = 1.6f,
-        beta = 1.2f,
+        minCutoff = 0.4f,
+        beta = 3.5f,
         predictionMs = CURSOR_PREDICTION_MS
     )
 
@@ -143,7 +157,31 @@ class HandGestureAnalyzer(
 
     // Bitmap source réutilisé (jamais transmis à MediaPipe, donc sûr à muter).
     private var reusableSource: Bitmap? = null
+
+    /**
+     * Petit jeu d'images de destination, utilisées à tour de rôle.
+     *
+     * `Bitmap.createBitmap(source, …, matrix, true)` **allouait une image entière à chaque frame** :
+     * 640 × 480 × 4 octets, trente fois par seconde, soit environ 36 Mo par seconde à ramasser. La
+     * pause de ramasse-miettes qui s'ensuit est exactement le genre de saccade qu'on ressent comme
+     * « ça rame » — et elle tombe au pire moment, puisqu'elle est provoquée par le flux de la
+     * caméra lui-même.
+     *
+     * Trois images suffisent, et le raisonnement vaut d'être écrit : MediaPipe conserve l'image de
+     * façon asynchrone, on ne peut donc pas n'en réutiliser qu'une. Mais le mode LIVE_STREAM ne
+     * traite qu'une inférence à la fois, de sorte qu'au moment de réécrire une image on en a
+     * publié deux autres depuis — soit une centaine de millisecondes, très au-delà de la durée
+     * d'une inférence. Et si la marge était malgré tout prise de vitesse, la conséquence serait
+     * une image d'entrée abîmée, donc des points de repère douteux pour une frame : une
+     * dégradation, jamais un plantage.
+     */
+    private val rotatedPool = arrayOfNulls<Bitmap>(ROTATED_POOL_SIZE)
+    private val rotatedCanvas = Canvas()
+    private var rotatedIndex = 0
     private val frameMatrix = Matrix()
+
+    /** Filtrage bilinéaire : équivalent du `filter = true` de l'ancienne allocation par frame. */
+    private val framePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private var lastRotationDegrees = Int.MIN_VALUE
 
     private var lastTimestamp = 0L
@@ -420,14 +458,52 @@ class HandGestureAnalyzer(
         source.copyPixelsFromBuffer(plane.buffer)
 
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        // Dimensions après rotation : les quarts de tour échangent largeur et hauteur.
+        val quarterTurn = rotationDegrees == 90 || rotationDegrees == 270
+        val outWidth = if (quarterTurn) height else width
+        val outHeight = if (quarterTurn) width else height
+
         if (rotationDegrees != lastRotationDegrees) {
             lastRotationDegrees = rotationDegrees
             frameMatrix.reset()
+            // **L'ordre est celui d'origine, et il n'est pas interchangeable.** Tourner puis
+            // réfléchir ne donne pas la même orientation que réfléchir puis tourner : les deux
+            // résultats sont symétriques l'un de l'autre, et une main gauche deviendrait une main
+            // droite. MediaPipe déduisant la latéralité de l'image, l'erreur serait invisible à la
+            // compilation et fausserait le suivi.
             frameMatrix.postRotate(rotationDegrees.toFloat())
             frameMatrix.postScale(-1f, 1f, width / 2f, height / 2f)
+
+            // `Bitmap.createBitmap(source, …, matrix, true)` calculait lui-même les bornes de
+            // l'image transformée et l'y recadrait. En dessinant sur un canevas, ce recadrage est
+            // à notre charge : sans lui, un quart de tour placerait l'image hors du cadre.
+            val corners = floatArrayOf(
+                0f, 0f, width.toFloat(), 0f, width.toFloat(), height.toFloat(), 0f, height.toFloat()
+            )
+            frameMatrix.mapPoints(corners)
+            var minX = corners[0]
+            var minY = corners[1]
+            for (i in corners.indices step 2) {
+                if (corners[i] < minX) minX = corners[i]
+                if (corners[i + 1] < minY) minY = corners[i + 1]
+            }
+            frameMatrix.postTranslate(-minX, -minY)
         }
 
-        return Bitmap.createBitmap(source, 0, 0, width, height, frameMatrix, true)
+        var destination = rotatedPool[rotatedIndex]
+        if (destination == null || destination.width != outWidth || destination.height != outHeight) {
+            destination?.recycle()
+            destination = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
+            rotatedPool[rotatedIndex] = destination
+        }
+        rotatedIndex = (rotatedIndex + 1) % rotatedPool.size
+
+        rotatedCanvas.setBitmap(destination)
+        rotatedCanvas.drawBitmap(source, frameMatrix, framePaint)
+        // Le canevas garde une référence sur l'image : la relâcher évite de la retenir plus
+        // longtemps que nécessaire, et rend la réutilisation lisible.
+        rotatedCanvas.setBitmap(null)
+        return destination
     }
 
     private fun updateFpsCounter() {
@@ -553,5 +629,9 @@ class HandGestureAnalyzer(
         activeDelegate = null
         reusableSource?.recycle()
         reusableSource = null
+        for (i in rotatedPool.indices) {
+            rotatedPool[i]?.recycle()
+            rotatedPool[i] = null
+        }
     }
 }

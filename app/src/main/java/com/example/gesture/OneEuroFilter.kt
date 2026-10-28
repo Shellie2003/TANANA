@@ -52,13 +52,43 @@ class LowPassFilter {
  * [predictionMs] extrapole la position le long du vecteur vitesse pour compenser la latence
  * résiduelle de la chaîne caméra -> inférence -> composition (typiquement 40 à 70 ms), ce qui
  * fait « coller » le curseur au doigt au lieu de le suivre avec un retard visible.
+ *
+ * Cette prédiction est **coupée en visée** ([predictionMinSpeed]), et c'est le réglage qui a le
+ * plus d'effet sur la précision : voir l'explication là-bas.
  */
 class OneEuroFilter(
     private val minCutoff: Float = 1.0f,
     private val beta: Float = 0.007f,
     private val dCutoff: Float = 1.0f,
     private val predictionMs: Float = 0f,
-    private val maxPredictionDelta: Float = 0.08f
+    private val maxPredictionDelta: Float = 0.08f,
+    /**
+     * Vitesse en deçà de laquelle la prédiction est **coupée**, en unités par seconde.
+     *
+     * Mesuré en harnais : la prédiction **doublait** le bruit résiduel du curseur en visée — 1,34
+     * pixel contre 0,62. La raison est structurelle : prédire, c'est extrapoler le long de la
+     * vitesse, et la vitesse est une **dérivée** du signal. Dériver amplifie le bruit, et le
+     * résultat est réinjecté dans la position. Au repos, la « vitesse » n'est donc que du bruit
+     * dérivé, et la prédiction la recopie dans le curseur.
+     *
+     * La prédiction sert à compenser la latence perçue, laquelle n'a de sens qu'en mouvement : un
+     * curseur immobile n'est jamais en retard. La couper en visée ne coûte donc rien et retire la
+     * principale source de bruit à l'instant où la précision compte. Ce n'est pas un compromis,
+     * c'est une correction : les deux grandeurs s'améliorent ensemble.
+     */
+    private val predictionMinSpeed: Float = 0.04f,
+    /**
+     * Vitesse à partir de laquelle la prédiction est pleine.
+     *
+     * Les deux bornes sont basses, et un test l'a imposé : un premier réglage les avait placées
+     * dans la bande des **déplacements lents mais volontaires** (0,2 à 0,5 unité par seconde), si
+     * bien que la prédiction y était bridée de moitié et que le curseur traînait sur les gestes
+     * posés. Or il n'y a pas besoin de monter si haut : l'estimateur de vitesse est lui-même filtré
+     * à 1 Hz, de sorte qu'un tremblement à 10 Hz n'y produit qu'une vitesse apparente d'environ
+     * 0,025 unité par seconde. Le bruit et le mouvement volontaire sont donc déjà séparés d'un
+     * ordre de grandeur — il suffit de placer la coupure entre les deux, pas au milieu du second.
+     */
+    private val predictionFullSpeed: Float = 0.20f
 ) {
     private val xFilter = LowPassFilter()
     private val dxFilter = LowPassFilter()
@@ -110,8 +140,15 @@ class OneEuroFilter(
         }
         previousSpeed = speed
 
+        // Fondu en fonction de la vitesse : nul en visée, plein en mouvement établi. C'est ce qui
+        // retire du curseur immobile le bruit que la dérivation injectait, sans rien concéder sur
+        // la latence là où elle se voit.
+        val gate = ((speed - predictionMinSpeed) / (predictionFullSpeed - predictionMinSpeed))
+            .coerceIn(0f, 1f)
+        if (gate <= 0f) return filtered
+
         // Extrapolation bornée : au-delà de maxPredictionDelta la prédiction devient du dépassement.
-        val predicted = velocity * (predictionMs / 1000f) * damping
+        val predicted = velocity * (predictionMs / 1000f) * damping * gate
         val clamped = predicted.coerceIn(-maxPredictionDelta, maxPredictionDelta)
         return filtered + clamped
     }
