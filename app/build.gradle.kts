@@ -17,8 +17,16 @@ android {
     applicationId = "com.aistudio.starklauncher.hud"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    // versionCode dérivé du numéro d'exécution de l'intégration continue.
+    //
+    // Android refuse d'installer par-dessus une application signée de la même clé si le
+    // versionCode n'a pas augmenté : avec une valeur figée à 1, chaque nouvelle APK devait être
+    // désinstallée à la main, ce qui efface au passage les réglages et l'autorisation
+    // d'accessibilité. Le numéro d'exécution croît strictement, c'est exactement la garantie
+    // demandée. En local il vaut 1, pour que le build hors CI reste possible.
+    val runNumber = providers.environmentVariable("GITHUB_RUN_NUMBER").orNull?.toIntOrNull() ?: 1
+    versionCode = runNumber
+    versionName = "1.0.$runNumber"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -374,14 +374,16 @@ invariance d'échelle, bruit et latence du filtre.
 ## Intégration continue
 
 Le workflow `.github/workflows/build-release-apk.yml` exécute les tests JVM puis assemble la
-variante installable, publiée dans la release `unsigned-latest` :
+variante installable, publiée dans la release `latest` :
 
 | Fichier | Minifiée par R8 | Usage |
 |---|---|---|
 | `a-release.apk` | oui | l'artefact installable |
 
-Elle est signée avec la clé de debug (`-PstarkDebugSigning=true`) : installable pour tester,
-jamais publiable. Le workflow vérifie au passage que `hand_landmarker.task` est bien présent dans
+La signature dépend des secrets du dépôt : avec les quatre secrets décrits plus bas, l'APK est
+signée de la clé de diffusion ; sans eux, le workflow retombe sur la clé de debug pour rester
+assemblable, et le dit dans les notes de release. Le workflow vérifie au passage que
+`hand_landmarker.task` est bien présent dans
 les assets **et** qu'il contient ses deux modèles internes : un modèle manquant ne casse pas la
 compilation, il casse la détection à l'exécution — c'est-à-dire au seul endroit où le défaut ne
 serait plus détectable automatiquement. Il vérifie aussi que `gesture_recognizer.task` a bien
@@ -392,15 +394,67 @@ adresse de téléchargement permanente pour la dernière version. Les assets de 
 préférés aux artefacts Actions parce qu'ils ne consomment pas le quota de stockage des
 artefacts, commun à tout le compte GitHub.
 
-Les keystores n'étant pas versionnés, les configurations de signature ne sont créées que si le
-fichier correspondant existe réellement. Sans keystore et sans `-PstarkDebugSigning`, AGP
-produit `app-release-unsigned.apk`, qu'Android refuse d'installer. Pour une vraie diffusion :
+Le `versionCode` est dérivé de `GITHUB_RUN_NUMBER`. Ce n'est pas cosmétique : Android refuse
+d'installer par-dessus une application de même signature si le `versionCode` n'a pas augmenté.
+Avec une valeur figée, chaque mise à jour imposait une désinstallation manuelle, qui efface les
+réglages **et** l'autorisation d'accessibilité. Le numéro d'exécution croît strictement, ce qui
+est exactement la garantie demandée.
+
+## Signature
+
+### Créer la clé, une seule fois
+
+```bash
+keytool -genkeypair -v \
+  -keystore ma-cle.jks \
+  -alias upload \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -storetype PKCS12
+```
+
+**Conservez ce fichier et ses mots de passe hors du dépôt, et sauvegardez-les.** Android
+identifie une application par son couple nom de paquet / clé de signature : perdre la clé rend
+toute mise à jour future impossible — les utilisateurs devraient désinstaller puis réinstaller,
+en perdant leurs données. `*.jks` et `*.keystore` sont dans `.gitignore`, et une clé privée qui
+entre dans l'historique Git y reste même après suppression du fichier.
+
+### Déclarer la clé à l'intégration continue
+
+Encodez le keystore en base64 — un secret GitHub ne transporte que du texte :
+
+```bash
+base64 -w0 ma-cle.jks > ma-cle.b64
+```
+
+Puis, dans *Settings → Secrets and variables → Actions → New repository secret*, créez les
+quatre secrets suivants :
+
+| Secret | Contenu |
+|---|---|
+| `RELEASE_KEYSTORE_BASE64` | le contenu de `ma-cle.b64` |
+| `RELEASE_STORE_PASSWORD` | le mot de passe du keystore |
+| `RELEASE_KEY_ALIAS` | l'alias, `upload` ci-dessus |
+| `RELEASE_KEY_PASSWORD` | le mot de passe de la clé |
+
+Le workflow décode le keystore dans `$RUNNER_TEMP`, hors de l'arborescence du dépôt : il ne peut
+donc être ni committé par mégarde ni téléversé parmi les artefacts, et il est effacé en fin de
+job même si celui-ci échoue. Le build affiche ensuite le certificat de l'APK produite et
+**échoue** si la signature attendue était celle de diffusion mais que le certificat porte
+`CN=Android Debug` — une APK silencieusement mal signée est le défaut qu'on ne remarque qu'au
+moment où la mise à jour est refusée sur l'appareil.
+
+### Signer en local
 
 ```bash
 KEYSTORE_PATH=/chemin/vers/ma-cle.jks \
 KEY_ALIAS=upload STORE_PASSWORD=... KEY_PASSWORD=... \
   ./gradlew assembleRelease
 ```
+
+Les configurations de signature ne sont créées que si le fichier de keystore existe réellement :
+sans cela, toute machine dépourvue de clé échouerait à assembler la variante release. Sans
+keystore et sans `-PstarkDebugSigning`, AGP produit `app-release-unsigned.apk`, qu'Android
+refuse d'installer.
 
 ## Configuration requise
 

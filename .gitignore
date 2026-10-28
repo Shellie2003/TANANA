@@ -16,3 +16,8 @@
 local.properties
 .env
 debug.keystore
+
+# Clés de signature. Une clé privée dans le dépôt est définitivement compromise :
+# l'historique Git la conserve même après suppression.
+*.jks
+*.keystore

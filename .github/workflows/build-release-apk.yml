@@ -57,6 +57,48 @@ jobs:
       - name: Rendre gradlew exécutable
         run: chmod +x ./gradlew
 
+      # Clé de signature de release, si elle a été déposée en secret.
+      #
+      # Le keystore est écrit dans RUNNER_TEMP, **en dehors du dépôt** : il ne peut donc ni être
+      # committé par accident, ni se retrouver dans un artefact. Les mots de passe passent par
+      # GITHUB_ENV, où GitHub les masque dans les journaux.
+      #
+      # Absence de secret = repli sur la clé de debug, et le build continue. Une intégration
+      # continue qui échouerait faute de clé empêcherait quiconque de cloner le dépôt et de
+      # vérifier que l'application compile.
+      - name: Préparer la clé de signature
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "Aucune clé de release fournie : signature avec la clé de debug."
+            echo "SIGNED_WITH=debug" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          keystore="$RUNNER_TEMP/release.jks"
+          # `base64 -d` échoue sur une chaîne mal encodée, et `set -e` fait alors échouer le
+          # build : mieux vaut s'arrêter ici que produire une APK de debug présentée comme signée.
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$keystore"
+          if [ ! -s "$keystore" ]; then
+            echo "::error::Le keystore décodé est vide : vérifiez RELEASE_KEYSTORE_BASE64."
+            exit 1
+          fi
+
+          {
+            echo "KEYSTORE_PATH=$keystore"
+            echo "STORE_PASSWORD=$STORE_PASSWORD"
+            echo "KEY_ALIAS=${KEY_ALIAS:-upload}"
+            echo "KEY_PASSWORD=${KEY_PASSWORD:-$STORE_PASSWORD}"
+            echo "SIGNED_WITH=release"
+          } >> "$GITHUB_ENV"
+          echo "Clé de release chargée ($(du -h "$keystore" | cut -f1))."
+
       # Les tests du moteur gestuel tournent sur JVM : quelques secondes, sans émulateur.
       # Ils s'exécutent avant l'assemblage pour échouer au plus tôt.
       - name: Tests unitaires
@@ -86,9 +128,18 @@ jobs:
       # supprimée plus bas : c'est le seul garde-fou contre une classe retirée par R8, un défaut
       # qui ne produit aucune erreur de compilation.
       #
-      # starkDebugSigning signe la release avec la clé de debug pour la rendre installable.
+      # starkDebugSigning n'est passé **que** faute de clé de release : il est le repli, pas le
+      # mode normal. Avec une clé fournie, Gradle la préfère de toute façon, mais ne pas passer
+      # l'option rend l'intention lisible — et fait échouer le build si la clé n'a pas été prise
+      # en compte, au lieu de retomber silencieusement sur la clé de debug.
       - name: Assembler l'APK
-        run: ./gradlew assembleRelease -PstarkDebugSigning=true
+        run: |
+          set -euo pipefail
+          if [ "${SIGNED_WITH:-debug}" = "release" ]; then
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleRelease -PstarkDebugSigning=true
+          fi
 
       - name: Vérifier que l'APK est signée
         run: |
@@ -103,13 +154,32 @@ jobs:
             echo "$label : $(du -h "$apk" | cut -f1)"
             # Une APK signée porte un bloc de signature v1 (META-INF/*.RSA) ou v2/v3
             # (APK Signing Block, invisible dans la liste zip). apksigner tranche sans ambiguïté.
-            local apksigner
+            local apksigner certs
             apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort | tail -1)
-            if ! "$apksigner" verify --print-certs "$apk" > /dev/null 2>&1; then
+            if ! certs=$("$apksigner" verify --print-certs "$apk" 2>&1); then
               echo "::error::$label n'est pas signée : elle ne pourra pas être installée."
               exit 1
             fi
-            echo "  signature vérifiée"
+
+            # Le certificat est affiché, et non seulement vérifié : c'est la seule façon de voir
+            # *quelle* clé a signé. Son empreinte est aussi l'identité de l'application pour
+            # Android — deux builds signés par des clés différentes ne se mettent pas à jour l'un
+            # l'autre, ils se refusent.
+            echo "$certs" | grep -E 'Signer #1 certificate (DN|SHA-256 digest)' || true
+
+            # Garde-fou contre le cas le plus trompeur : une clé de release demandée, un secret mal
+            # formé, et une APK de debug publiée comme si elle était signée. Le certificat de debug
+            # d'Android porte toujours ce nom.
+            if [ "${SIGNED_WITH:-debug}" = "release" ] && \
+               echo "$certs" | grep -q 'CN=Android Debug'; then
+              echo "::error::Signature de release demandée, mais l'APK porte le certificat de debug."
+              exit 1
+            fi
+            if [ "${SIGNED_WITH:-debug}" = "debug" ] && \
+               ! echo "$certs" | grep -q 'CN=Android Debug'; then
+              echo "::warning::APK signée par une clé inattendue alors qu'aucune clé de release n'était fournie."
+            fi
+            echo "  signature vérifiée (clé : ${SIGNED_WITH:-debug})"
           }
 
           release=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
@@ -218,7 +288,7 @@ jobs:
       - name: Publier l'APK dans la release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: unsigned-latest
+          TAG: latest
         run: |
           set -euo pipefail
 
@@ -228,14 +298,30 @@ jobs:
             assets+=("mapping-r8.txt")
           fi
 
+          if [ "${SIGNED_WITH:-debug}" = "release" ]; then
+            signature_note=$(cat <<'SIG'
+          Elle est **signée avec la clé de release** du dépôt : publiable, et chaque build
+          s'installe par-dessus le précédent. L'empreinte du certificat est affichée dans le
+          journal du build, à l'étape « Vérifier que l'APK est signée ».
+          SIG
+            )
+          else
+            signature_note=$(cat <<'SIG'
+          Elle est **signée avec la clé de debug** : installable pour tester, mais à ne jamais
+          publier. Pour une vraie diffusion, déposer la clé dans les secrets du dépôt —
+          `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`,
+          `RELEASE_KEY_PASSWORD`. Voir la section « Signature » du README.
+          SIG
+            )
+          fi
+
           cat > notes.md <<NOTES
-          Build installable depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`).
+          Build installable depuis \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA:0:7}\`), version
+          \`${GITHUB_RUN_NUMBER}\`.
 
           L'APK à installer est \`$RELEASE_APK\`.
 
-          Elle est **signée avec la clé de debug** : installable pour tester, mais à ne
-          jamais publier. Une vraie diffusion exige un keystore de release
-          (\`KEYSTORE_PATH\`, \`KEY_ALIAS\`, \`STORE_PASSWORD\`, \`KEY_PASSWORD\`).
+          $signature_note
 
           En cas de « moteur de vision indisponible », le message affiché dans l'application
           porte la version d'Android, l'ABI et la taille de page de l'appareil : c'est ce qui
@@ -253,6 +339,11 @@ jobs:
 
           echo "URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${RELEASE_APK}" >> "$GITHUB_ENV"
 
+      # La clé ne doit pas survivre au build, même si une étape a échoué avant.
+      - name: Effacer la clé de signature
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
       - name: Récapitulatif
         if: always()
         run: |
@@ -263,5 +354,6 @@ jobs:
             echo "|---|---|"
             echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
             echo "| Téléchargement | ${URL:-non publié} |"
-            echo "| Signature | clé de debug — installable, non publiable |"
+            echo "| Signature | ${SIGNED_WITH:-debug} |"
+            echo "| Version | \`${GITHUB_RUN_NUMBER}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
