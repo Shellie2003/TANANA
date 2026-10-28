@@ -1,5 +1,6 @@
-# Assemble l'application en une APK installable, signée avec la clé de debug.
-name: APK installable (signée debug)
+# Assemble l'application en une APK installable, signée avec la clé de release déposée en
+# secret, ou à défaut avec la clé de debug pour que le build reste possible sans clé.
+name: APK installable
 
 on:
   push:
