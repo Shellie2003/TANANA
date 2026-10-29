@@ -111,7 +111,23 @@ sealed interface PointerEvent {
  */
 class Pointer(
     private val config: Config = Config(),
-    private val detector: PinchDetector = PinchDetector()
+    private val detector: PinchDetector = PinchDetector(),
+    /**
+     * Y a-t-il quelque chose de cliquable à cette position ?
+     *
+     * Injecté plutôt que consulté directement, pour que [Pointer] reste du Kotlin pur et testable
+     * en JVM : la réponse vient de l'arbre d'accessibilité, qui n'existe que sur l'appareil.
+     *
+     * Appelé **une seule fois par attente**, au moment où elle est presque acquise, et non à chaque
+     * image : chaque consultation parcourt l'arbre d'accessibilité, soit un appel interprocessus
+     * par nœud sur le thread principal. Le faire trente fois par seconde était la cause d'une des
+     * saccades déjà corrigées dans ce projet.
+     *
+     * Null signifie « pas de réponse disponible » — service d'accessibilité inactif, par exemple —
+     * et le maintien se comporte alors comme avant, c'est-à-dire sans exigence de cible. Mieux vaut
+     * un clic possiblement mal placé qu'un clic devenu impossible.
+     */
+    private val targetProbe: ((Float, Float) -> Boolean)? = null
 ) {
 
     data class Config(
@@ -221,7 +237,38 @@ class Pointer(
          * paie entre deux appuis plutôt que sur un seul. Un cinquième de diagonale reste bien
          * au-delà de toute dérive involontaire.
          */
-        val dwellRearmTravel: Float = 0.05f
+        val dwellRearmTravel: Float = 0.05f,
+
+        /**
+         * Écart de temps entre deux images au-delà duquel l'attente du maintien est **relancée**.
+         *
+         * **Corrige le défaut exact que l'utilisateur a décrit** : « si on est en retard,
+         * l'application clique sur des endroits non souhaités ». Le maintien mesure l'immobilité du
+         * *curseur*, et une chaîne qui décroche produit un curseur parfaitement immobile — la
+         * dernière position connue, qui n'est pas celle de la main. Une pause de 400 ms dans
+         * l'arrivée des images était donc comptée comme 400 ms de visée stable, et l'appui partait
+         * à un endroit que la main avait quitté depuis longtemps.
+         *
+         * Le seuil est au-dessus de l'intervalle d'une image même à cadence basse — 12 images par
+         * seconde font 83 ms — et bien en dessous de ce qui constitue un décrochage. Le maintien ne
+         * compte donc que du temps pendant lequel il a réellement observé la main.
+         */
+        val dwellMaxFrameGapMs: Long = 140L,
+
+        /**
+         * Le maintien doit-il exiger une cible réellement cliquable sous le curseur ?
+         *
+         * C'est la seconde moitié de la réponse au même reproche, et la plus importante. Le
+         * maintien ne peut pas distinguer « je réfléchis » de « je veux cliquer » — c'est le
+         * problème du toucher de Midas, commun à tous les systèmes à temporisation, et le
+         * raccourcir ne fait que l'aggraver. Mais on peut rendre l'erreur **inoffensive** : rester
+         * immobile au-dessus d'un paragraphe de texte, d'une image ou d'une zone vide ne produit
+         * alors plus rien du tout.
+         *
+         * Ce qui subsiste — un appui involontaire sur un bouton effectivement visé — est le cas où
+         * l'intention est de toute façon la plus probable, et le seul où un clic a un sens.
+         */
+        val dwellRequiresTarget: Boolean = true
     )
 
     /** Où en est le geste courant. */
@@ -315,6 +362,12 @@ class Pointer(
     private var dwellSince = 0L
     private var lastDwellX = 0.5f
     private var lastDwellY = 0.5f
+
+    /** Instant de la dernière image vue, pour détecter un trou dans le flux. */
+    private var dwellLastFrameAt = Long.MIN_VALUE
+
+    /** L'exigence de cible a-t-elle déjà été évaluée pour l'attente en cours ? */
+    private var targetChecked = false
 
     fun reset() {
         phase = Phase.IDLE
@@ -420,12 +473,24 @@ class Pointer(
             return emptyList()
         }
 
+        // Trou dans l'arrivée des images : on n'a pas observé la main pendant ce temps, donc on ne
+        // peut pas le compter comme de l'immobilité. C'est le « si on est en retard » du reproche.
+        val gap = if (dwellLastFrameAt == Long.MIN_VALUE) 0L else nowMs - dwellLastFrameAt
+        dwellLastFrameAt = nowMs
+        if (gap > config.dwellMaxFrameGapMs) {
+            dwellSince = nowMs
+            dwellProgress = 0f
+            targetChecked = false
+            return emptyList()
+        }
+
         if (!dwellArmed) {
             if (hypot(cursorX - lastDwellX, cursorY - lastDwellY) >= config.dwellRearmTravel) {
                 dwellArmed = true
                 dwellAnchorX = cursorX
                 dwellAnchorY = cursorY
                 dwellSince = nowMs
+                targetChecked = false
             }
             dwellProgress = 0f
             return emptyList()
@@ -439,11 +504,26 @@ class Pointer(
             dwellAnchorY = cursorY
             dwellSince = nowMs
             dwellProgress = 0f
+            targetChecked = false
             return emptyList()
         }
 
         val heldMs = nowMs - dwellSince
         dwellProgress = (heldMs.toFloat() / config.dwellMs).coerceIn(0f, 1f)
+
+        // Exigence de cible, évaluée une seule fois par attente et avant son terme : l'anneau se
+        // vide alors au lieu de se remplir en vain, ce qui enseigne où le maintien fonctionne.
+        if (config.dwellRequiresTarget && !targetChecked && dwellProgress >= TARGET_CHECK_PROGRESS) {
+            targetChecked = true
+            val probe = targetProbe
+            if (probe != null && !probe(dwellAnchorX, dwellAnchorY)) {
+                // Rien de cliquable ici : l'attente est abandonnée, et il faudra un déplacement
+                // franc pour en relancer une. Rester là ne produira donc plus rien.
+                disarmDwell(dwellAnchorX, dwellAnchorY)
+                return emptyList()
+            }
+        }
+
         if (heldMs < config.dwellMs) return emptyList()
 
         // L'appui porte sur l'ancre, et non sur la position courante : c'est l'endroit visé
@@ -467,9 +547,21 @@ class Pointer(
         return config.dwellRadius * (1f + (config.dwellHoldRadiusFactor - 1f) * engaged)
     }
 
+    private companion object {
+        /**
+         * Progression à laquelle la présence d'une cible est vérifiée.
+         *
+         * Avant le terme, pour que l'anneau se vide plutôt que d'aboutir dans le vide — et assez
+         * tard pour qu'un simple passage du curseur ne déclenche pas de parcours de l'arbre
+         * d'accessibilité, qui coûte un appel interprocessus par nœud.
+         */
+        const val TARGET_CHECK_PROGRESS = 0.55f
+    }
+
     private fun disarmDwell(x: Float, y: Float) {
         dwellArmed = false
         dwellProgress = 0f
+        targetChecked = false
         lastDwellX = x
         lastDwellY = y
     }

@@ -52,6 +52,7 @@ import com.example.control.ClickTuning
 import com.example.control.Command
 import com.example.control.CommandList
 import com.example.control.PinchTelemetry
+import com.example.gesture.ClickTrigger
 import com.example.control.ScrollTuning
 import com.example.power.PowerMode
 import com.example.ui.theme.StarkBlue
@@ -105,6 +106,8 @@ fun StarkControlCenter(
     clickTuning: ClickTuning,
     scrollTuning: ScrollTuning,
     onToggleEngine: (Boolean) -> Unit,
+    clickTrigger: ClickTrigger = ClickTrigger.DEFAULT,
+    onClickTriggerChange: (ClickTrigger) -> Unit = {},
     onClickTuningChange: (ClickTuning) -> Unit,
     onScrollTuningChange: (ScrollTuning) -> Unit,
     onToggleCommand: (Command) -> Unit,
@@ -145,7 +148,12 @@ fun StarkControlCenter(
         // silencieux, et donc celui dont l'utilisateur a besoin d'un retour chiffré.
         if (status.isRunning) {
             item { SectionTitle("Réglage du pincement", "La course de votre main s'apprend seule.") }
-            item { PinchCard(status.pinch, clickTuning, onClickTuningChange) }
+            item {
+                PinchCard(
+                    status.pinch, clickTrigger, onClickTriggerChange,
+                    clickTuning, onClickTuningChange
+                )
+            }
         }
 
         item { SectionTitle("Défilement", "Pincez et déplacez la main ; relâchez en mouvement pour lancer l'inertie.") }
@@ -425,6 +433,8 @@ private fun Metric(label: String, value: String, modifier: Modifier = Modifier) 
 @Composable
 private fun PinchCard(
     click: PinchTelemetry,
+    trigger: ClickTrigger,
+    onTriggerChange: (ClickTrigger) -> Unit,
     tuning: ClickTuning,
     onTuningChange: (ClickTuning) -> Unit
 ) {
@@ -511,7 +521,19 @@ private fun PinchCard(
         // Le réglage reste accessible pendant la calibration : « Souple » est précisément ce dont
         // a besoin quelqu'un dont les appuis ne partent pas, et donc dont la main est mal suivie.
         Spacer(Modifier.height(14.dp))
-        ThreeWayPicker(
+        // Le choix du geste lui-même vient avant sa fermeté : régler la seconde sans savoir
+        // laquelle des deux on règle n'aurait pas de sens.
+        ChoicePicker(
+            title = "Geste du clic",
+            options = ClickTrigger.entries,
+            current = trigger,
+            label = { it.label },
+            description = { it.description },
+            onPick = onTriggerChange
+        )
+
+        Spacer(Modifier.height(14.dp))
+        ChoicePicker(
             title = "Fermeté du geste",
             options = ClickTuning.entries,
             current = tuning,
@@ -540,7 +562,7 @@ private fun ScrollCard(tuning: ScrollTuning, onTuningChange: (ScrollTuning) -> U
             .border(1.dp, StarkCyan.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
             .padding(16.dp)
     ) {
-        ThreeWayPicker(
+        ChoicePicker(
             title = "Vivacité du défilement",
             options = ScrollTuning.entries,
             current = tuning,
@@ -561,7 +583,7 @@ private fun ScrollCard(tuning: ScrollTuning, onTuningChange: (ScrollTuning) -> U
 
 /** Sélecteur à trois positions, partagé par les réglages de fermeté et de vivacité. */
 @Composable
-private fun <T> ThreeWayPicker(
+private fun <T> ChoicePicker(
     title: String,
     options: List<T>,
     current: T,

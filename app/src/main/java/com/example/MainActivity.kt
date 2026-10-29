@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 import com.example.control.Command
 import com.example.control.BindingsStore
 import com.example.control.ClickTuning
+import com.example.gesture.ClickTrigger
 import com.example.control.ScrollTuning
 import com.example.control.CommandList
 import com.example.power.PowerMode
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var bindingsStore: BindingsStore
     private var commands by mutableStateOf(CommandList())
     private var clickTuning by mutableStateOf(ClickTuning.DEFAULT)
+    private var clickTrigger by mutableStateOf(ClickTrigger.DEFAULT)
     private var scrollTuning by mutableStateOf(ScrollTuning.DEFAULT)
 
     private val requestCamera = registerForActivityResult(
@@ -77,6 +79,7 @@ class MainActivity : ComponentActivity() {
         bindingsStore = BindingsStore(this)
         commands = bindingsStore.loadCommands()
         clickTuning = bindingsStore.loadClickTuning()
+        clickTrigger = bindingsStore.loadClickTrigger()
         scrollTuning = bindingsStore.loadScrollTuning()
         refreshPermissions()
 
@@ -108,8 +111,10 @@ class MainActivity : ComponentActivity() {
                         setupSteps = buildSetupSteps(),
                         commands = commands,
                         clickTuning = clickTuning,
+                        clickTrigger = clickTrigger,
                         scrollTuning = scrollTuning,
                         onToggleEngine = ::toggleEngine,
+                        onClickTriggerChange = ::applyClickTrigger,
                         onClickTuningChange = ::applyClickTuning,
                         onScrollTuningChange = ::applyScrollTuning,
                         onToggleCommand = ::toggleCommand
@@ -232,6 +237,19 @@ class MainActivity : ComponentActivity() {
      * relancer est ce qui rend le changement perceptible tout de suite, au moment même où
      * l'utilisateur va l'essayer.
      */
+    /**
+     * Enregistre le geste qui enfonce le bouton.
+     *
+     * Le service est redémarré, et c'est voulu : la course apprise appartient au signal précédent.
+     * La garder après un changement de geste ferait juger une ouverture de main contre la
+     * référence d'un pincement, ce qui ne déclencherait rien.
+     */
+    private fun applyClickTrigger(trigger: ClickTrigger) {
+        clickTrigger = trigger
+        bindingsStore.saveClickTrigger(trigger)
+        if (StarkVisionService.isRunning) StarkVisionService.start(this)
+    }
+
     private fun applyClickTuning(tuning: ClickTuning) {
         clickTuning = tuning
         bindingsStore.saveClickTuning(tuning)

@@ -94,7 +94,8 @@ et sans conséquence ici : ce défaut n'existe que s'il y a autre chose à confo
 | Ce qu'on fait | Ce que ça donne |
 |---|---|
 | déplacer la main | le curseur suit, quelle que soit la forme de la main |
-| pincer et relâcher sans bouger | **appui** — le clic |
+| **ouvrir la main** | **appui** — le clic, par défaut |
+| pincer et relâcher sans bouger | **appui** — si le pincement est choisi comme geste du clic |
 | pincer et rester immobile | **appui long** — menus contextuels, sélection de texte |
 | pincer et déplacer la main | **tracé continu** — défilement, balayage, glisser-déposer |
 | viser et ne plus bouger | **appui**, sans pincer du tout |
@@ -116,6 +117,82 @@ reconnu. On ouvre un tracé, il suit la main, et **c'est le système qui l'inter
 défilement, en balayage, en glisser-déposer — exactement comme il le fait d'un doigt posé sur la
 vitre. Il n'y a donc ni geste de défilement ni geste de balayage à distinguer : il y a un doigt, et
 Android sait déjà quoi faire d'un doigt.
+
+#### Le curseur a reculé à la base de l'index, et pourquoi il a fallu
+
+Le clic par défaut est désormais **l'ouverture de la main**. Le choix vient de l'usage : le maintien
+plaisait mais cliquait au mauvais endroit quand la chaîne était en retard, et le pincement reste
+disponible en un réglage. Mais ce geste imposait une conséquence que la mesure a rendue
+incontournable.
+
+Le curseur venait du bout de l'index, pondéré avec la phalange — le point le plus fin pour viser,
+puisque c'est avec lui qu'on pointe. Or **ouvrir la main étend l'index**, donc déplace son bout.
+Mesuré en harnais, entre main détendue et main ouverte :
+
+| source du curseur | déplacement en ouvrant la main |
+|---|---|
+| bout de l'index | **122 px** sur un écran de 1080 |
+| base de l'index (le MCP) | **0 px** |
+| poignet | 0 px |
+
+Deux centimètres, soit plus qu'une cible tactile ordinaire — et le déplacement est **progressif et
+simultané au signal** : à mi-signal, le curseur a déjà bougé de 50 px. Le geste de clic serait ainsi
+devenu la première cause d'imprécision du clic. Aucune ancre antérieure n'y remédie, puisqu'il
+faudrait la prendre avant le début de l'ouverture et que c'est l'ouverture qu'on détecte.
+
+Le curseur suit donc la **base** de l'index, qui appartient à la paume et ne bouge pas quand les
+doigts s'étendent. On pointe toujours dans la direction de l'index, mais le curseur ne suit plus
+l'articulation du doigt. Ce qu'on y perd est réel : la finesse du bout du doigt, et la possibilité
+de pointer sans déplacer la main. Ce qu'on y gagne est un clic qui part là où on visait.
+
+#### Mesurer « main ouverte » sans retomber dans la classification de formes
+
+C'était le risque, puisque trois vocabulaires de poses ont échoué ici. Reconstituer « main ouverte »
+à partir de quatre extensions de doigts ramènerait le défaut exact qui les a fait retirer :
+l'extension d'un doigt replié se déduit de phalanges invisibles que le modèle devine.
+
+La mesure retenue n'interroge aucun doigt en particulier. C'est la **plus petite distance entre le
+centre de la paume et un bout de doigt**, normalisée par la taille de la paume. Les points
+utilisés sont tous parfaitement visibles dans le seul cas où la réponse doit être « oui », et quand
+la main est refermée la mesure n'a besoin que d'être basse — ce que les erreurs d'estimation
+produisent de toute façon.
+
+Le **minimum** et non la moyenne, et c'est la mesure qui l'a décidé : « main ouverte » signifie
+*tous* les doigts étendus, donc la contrainte qui lie est le doigt le moins étendu. La moyenne
+sépare d'un facteur 1,36, le minimum de **1,61**. Le minimum est plus sensible à un doigt mal
+suivi, et c'est assumé : il produit alors un clic **manqué**, là où la moyenne produirait un clic
+**fantôme**. Des deux, le premier se recommence ; le second agit sur le téléphone.
+
+| main | mesure |
+|---|---|
+| poing fermé | 0,44 |
+| détendue | 0,67 |
+| ouverte | 1,08 |
+
+Sa faiblesse doit être écrite : le signal sépare trois fois moins bien que le pincement, et sa pente
+s'écrase en fin de course — 0,84 au milieu de la plage, **0,06** sur les derniers dix pour cent
+d'ouverture. « Grande ouverte » est donc presque indistinguable de « ouverte à 75 % ». C'est
+pourquoi le seuil est appris et non constant, et pourquoi l'ouverture exige plus de profondeur que
+le pincement.
+
+#### Deux constantes tenues pour universelles, deux fois le même clic qui ne partait pas
+
+Le détecteur juge un scalaire qui descend vers un seuil appris ; il ne sait rien du geste qui le
+pilote. Il suffit donc de retourner l'étendue autour d'un pivot pour qu'il la traite sans une ligne
+de modification — y compris la correction qui avait rendu le seuil atteignable.
+
+Sauf que deux de ses constantes étaient, sans que rien ne le dise, **calibrées sur le pincement** :
+
+- le **plancher supposé** avant tout geste observé. Un pincement descend à 30 % de l'écart au repos,
+  une ouverture de main à 73 % du sien. Avec la supposition du pincement, le seuil se trouvait très
+  au-dessous de ce que le geste peut atteindre : aucune ouverture ne déclenchait d'appui.
+- le **plafond du seuil**, garde-fou contre une course quasi nulle. Sa valeur, 70 % de la ligne de
+  base, se trouve juste *au* plancher de l'ouverture, qui est à 69 %. Il écrasait donc le seuil sur
+  le plancher, avec le même résultat.
+
+Chacune a été prise en flagrant délit par le même test de bout en bout, l'une après l'autre. Les
+deux appartiennent maintenant au déclencheur, et non au détecteur : on ne peut plus construire un
+détecteur pour un geste sans dire lequel.
 
 #### Le clic était impossible, pas mal réglé
 
@@ -175,7 +252,8 @@ D'où deux chemins qui ne demandent aucune articulation :
 - **Le clic par maintien.** Viser et ne plus bouger déclenche l'appui. C'est le mécanisme de tous
   les suivis oculaires et céphaliques, pour cette raison exactement. Il faut avoir **quitté** le
   dernier point cliqué pour en viser un autre, ce qui rend la rafale impossible ; l'anneau du
-  curseur montre le compte à rebours, donc bouger l'annule.
+  curseur montre le compte à rebours, donc bouger l'annule. **Et il ne clique que sur une cible
+  réellement cliquable** — voir ci-dessous.
 - **Le défilement par les bords.** Poser le curseur contre un bord y fait défiler en continu,
   d'autant plus vite qu'on s'en approche. Il passe par les actions d'accessibilité du nœud
   défilable, et non par un doigt synthétisé : aucune trajectoire n'est transmise, donc le bruit de
@@ -225,6 +303,29 @@ n'existe : la commande se choisit dans le panneau, au bord droit de l'écran. L'
 commander un défilement vers la gauche dès que la main revient vers le contenu — le mode se serait
 mis à défiler tout seul, sur le mauvais axe, au moment de son activation. Il s'arme donc, puis
 attend que la main se pose : la première position tenue 300 ms devient le zéro.
+
+#### « Si on est en retard, ça clique au mauvais endroit » : deux causes
+
+La première est un **bug**, et il explique le mot « en retard » à la lettre. Le maintien mesure
+l'immobilité du *curseur*, et une chaîne qui décroche produit un curseur parfaitement immobile — la
+dernière position connue, qui n'est pas celle de la main. Une pause de 400 ms dans l'arrivée des
+images était donc comptée comme 400 ms de visée stable, et l'appui partait là où la main n'était
+plus. L'attente est désormais relancée dès qu'un écart de plus de 140 ms sépare deux images : elle
+ne compte que du temps pendant lequel elle a réellement observé la main.
+
+La seconde n'est pas un bug mais une propriété du mécanisme : **le maintien ne peut pas distinguer
+« je réfléchis » de « je veux cliquer ».** C'est le problème du toucher de Midas, commun à tous les
+systèmes à temporisation, et le raccourcir ne fait que l'aggraver. On ne peut donc pas supprimer
+l'erreur — mais on peut la rendre inoffensive : le maintien n'agit plus que si le curseur se pose
+sur quelque chose de **réellement cliquable**, ce que l'arbre d'accessibilité sait dire. Rester
+immobile au-dessus d'un paragraphe, d'une image ou d'une zone vide ne produit plus rien, et l'anneau
+se vide au lieu de se remplir en vain, ce qui enseigne où le maintien fonctionne.
+
+Ce qui subsiste — un appui involontaire sur un bouton effectivement visé — est le cas où l'intention
+est de toute façon la plus probable, et le seul où un clic a un sens. La vérification coûte un
+parcours de l'arbre d'accessibilité, soit un appel interprocessus par nœud : elle a donc lieu **une
+fois par attente**, pas à chaque image, la seconde option ayant déjà causé une des saccades
+corrigées plus bas.
 
 #### Deux ajouts corrects, un défaut à leur rencontre
 

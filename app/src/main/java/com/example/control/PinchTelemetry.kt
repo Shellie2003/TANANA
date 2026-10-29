@@ -57,10 +57,13 @@ data class PinchTelemetry(
             // le cas le plus fréquent, à quelqu'un dont les doigts se touchaient parfaitement et
             // dont le seuil était simplement hors d'atteinte. Un conseil faux est pire qu'aucun
             // conseil, parce qu'il envoie corriger un geste qui était correct.
+            // Formulé sans nommer le geste, puisqu'il y en a deux — pincement ou main ouverte — et
+            // qu'un conseil qui parlerait du pouce à qui ouvre la main serait à nouveau un conseil
+            // adressé à une faute non commise.
             PinchDetector.Rejection.TOO_SHALLOW ->
-                "La fermeture s'est arrêtée avant le seuil. Si vos doigts se touchaient bel et " +
-                    "bien, la course sera apprise à l'essai suivant : réessayez une ou deux fois, " +
-                    "ou choisissez la fermeté « Souple »."
+                "Le geste s'est arrêté avant le seuil. S'il vous a paru complet, c'est que votre " +
+                    "course n'est pas encore apprise : réessayez une ou deux fois, ou choisissez " +
+                    "la fermeté « Souple »."
 
             PinchDetector.Rejection.COOLDOWN ->
                 "Deux appuis très rapprochés ont été détectés ; le second a été ignoré."

@@ -89,6 +89,77 @@ class HandGeometryTest {
         assertEquals(0.4f, droite.palmX - gauche.palmX, 1e-3f)
     }
 
+    // --- L'ouverture de la main, le nouveau bouton -------------------------------------------
+
+    /**
+     * **La propriété sur laquelle repose toute la décision de reculer le curseur.**
+     *
+     * Le curseur venait du bout de l'index. Si le clic est l'ouverture de la main, alors le geste de
+     * clic étend l'index et déplace donc son bout : mesuré en harnais, 122 px sur un écran de 1080,
+     * progressivement et en même temps que le signal. Le clic serait parti là où le doigt arrive, et
+     * non là où l'on visait.
+     *
+     * La base de l'index appartient à la paume, qui est rigide. Ce test interdit tout retour en
+     * arrière sur ce point.
+     */
+    @Test
+    fun `le curseur ne bouge pas quand les doigts s etendent`() {
+        val detendue = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(0.35f, 0.35f, 0.35f, 0.35f))
+        )
+        val ouverte = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(1f, 1f, 1f, 1f))
+        )
+
+        assertEquals("le curseur a bougé en X", detendue.pointerX, ouverte.pointerX, 1e-4f)
+        assertEquals("le curseur a bougé en Y", detendue.pointerY, ouverte.pointerY, 1e-4f)
+    }
+
+    @Test
+    fun `l etendue distingue la main detendue de la main ouverte`() {
+        val detendue = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(0.35f, 0.35f, 0.35f, 0.35f))
+        )
+        val ouverte = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(1f, 1f, 1f, 1f))
+        )
+        val poing = SyntheticHand.metrics(
+            SyntheticHand.build(extension = floatArrayOf(0f, 0f, 0f, 0f))
+        )
+
+        assertTrue(
+            "poing=${poing.openness} détendue=${detendue.openness} ouverte=${ouverte.openness}",
+            poing.openness < detendue.openness && detendue.openness < ouverte.openness
+        )
+        assertTrue("écart trop faible", ouverte.openness - detendue.openness > 0.2f)
+    }
+
+    /**
+     * Même exigence que pour le pincement, et pour la même raison : un seuil sur l'étendue ne vaut
+     * que si la mesure ne dépend pas de la distance de la main à la caméra.
+     */
+    @Test
+    fun `l etendue est invariante a l echelle de la main`() {
+        val loin = SyntheticHand.metrics(
+            SyntheticHand.build(scale = 0.09f, extension = floatArrayOf(1f, 1f, 1f, 1f))
+        )
+        val pres = SyntheticHand.metrics(
+            SyntheticHand.build(scale = 0.22f, extension = floatArrayOf(1f, 1f, 1f, 1f))
+        )
+        assertEquals(pres.openness, loin.openness, 0.02f)
+    }
+
+    /**
+     * L'étendue ne doit pas dépendre du pincement : sinon les deux déclencheurs se perturberaient,
+     * et le pouce qui rejoint l'index ferait varier le signal de l'ouverture.
+     */
+    @Test
+    fun `l etendue ne depend pas du pincement`() {
+        val ouvert = SyntheticHand.metrics(SyntheticHand.build(pinchDistance = 0.9f)).openness
+        val ferme = SyntheticHand.metrics(SyntheticHand.build(pinchDistance = 0.08f)).openness
+        assertEquals("le pincement a fait varier l'étendue", ouvert, ferme, 0.02f)
+    }
+
     @Test
     fun `l ancre du curseur suit la main`() {
         val gauche = SyntheticHand.metrics(SyntheticHand.build(cx = 0.25f))

@@ -520,6 +520,95 @@ class PointerTest {
         )
     }
 
+    /**
+     * **Le défaut exact que l'utilisateur a décrit** : « si on est en retard, l'application clique
+     * sur des endroits non souhaités ».
+     *
+     * Le maintien mesure l'immobilité du *curseur*, et une chaîne qui décroche produit un curseur
+     * parfaitement immobile — la dernière position connue, qui n'est pas celle de la main. Une pause
+     * de 400 ms dans l'arrivée des images était donc comptée comme 400 ms de visée stable, et
+     * l'appui partait là où la main n'était plus.
+     */
+    @Test
+    fun `un trou dans le flux d images ne compte pas comme de l immobilite`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        // Deux images séparées par un décrochage de 600 ms : de quoi aboutir si le trou comptait.
+        d.frame(0.8f, 0.3f, open)
+        d.t += 600L
+        d.frame(0.8f, 0.3f, open)
+        assertTrue(
+            "le décrochage a été compté comme de la visée stable",
+            d.only<PointerEvent.Tap>().isEmpty()
+        )
+    }
+
+    /** Et après le trou, l'attente repart proprement plutôt que de rester bloquée. */
+    @Test
+    fun `apres un trou l attente repart et aboutit`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frame(0.8f, 0.3f, open)
+        d.t += 600L
+        d.frames(30, 0.8f, 0.3f, open)
+        assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    // --- Le maintien n'agit que sur une cible -------------------------------------------------
+
+    /**
+     * Le maintien ne peut pas distinguer « je réfléchis » de « je veux cliquer » : c'est le problème
+     * du toucher de Midas, commun à tous les systèmes à temporisation, et le raccourcir ne fait que
+     * l'aggraver. On ne peut donc pas supprimer l'erreur, mais on peut la rendre **inoffensive** :
+     * rester immobile au-dessus d'un paragraphe, d'une image ou d'une zone vide ne produit rien.
+     */
+    @Test
+    fun `le maintien ne clique pas la ou rien n est cliquable`() {
+        val d = Driver(Pointer(targetProbe = { _, _ -> false }))
+        d.frames(40, 0.5f, 0.5f, open)
+        d.events.clear()
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frames(60, 0.8f, 0.3f, open)
+        assertTrue("un appui est parti sur du vide", d.only<PointerEvent.Tap>().isEmpty())
+    }
+
+    @Test
+    fun `le maintien clique la ou une cible existe`() {
+        val d = Driver(Pointer(targetProbe = { _, _ -> true }))
+        d.frames(40, 0.5f, 0.5f, open)
+        d.events.clear()
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frames(30, 0.8f, 0.3f, open)
+        assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    /**
+     * Sans sonde disponible — service d'accessibilité inactif — le maintien doit continuer de
+     * fonctionner. Mieux vaut un clic possiblement mal placé qu'un clic devenu impossible.
+     */
+    @Test
+    fun `sans sonde de cible le maintien fonctionne quand meme`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frames(30, 0.8f, 0.3f, open)
+        assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    /**
+     * La sonde parcourt l'arbre d'accessibilité, soit un appel interprocessus par nœud sur le
+     * thread principal : la consulter à chaque image était la cause d'une des saccades déjà
+     * corrigées dans ce projet. Une fois par attente suffit.
+     */
+    @Test
+    fun `la sonde de cible n est consultee qu une fois par attente`() {
+        var calls = 0
+        val d = Driver(Pointer(targetProbe = { _, _ -> calls++; true }))
+        d.frames(40, 0.5f, 0.5f, open)
+        d.frames(3, 0.8f, 0.3f, open)
+        d.frames(30, 0.8f, 0.3f, open)
+        assertEquals("la sonde a été consultée $calls fois", 1, calls)
+    }
+
     @Test
     fun `le maintien peut etre desactive`() {
         val d = Driver(Pointer(Pointer.Config(dwellEnabled = false)))

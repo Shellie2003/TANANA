@@ -66,9 +66,14 @@ object HandLandmarks {
 data class HandMetrics(
     /** Référence d'échelle de la main (moyenne poignet->majeur et largeur de paume). */
     val palmScale: Float,
-    /** Distance pouce/index normalisée par [palmScale]. Le seul bouton de l'application. */
+    /** Distance pouce/index normalisée par [palmScale]. */
     val pinchRatio: Float,
-    /** Position d'ancrage du curseur (bout d'index stabilisé). */
+    /**
+     * Étendue de la main, en multiples de [palmScale] : 0,59 poing fermé, 0,86 détendue, 1,17
+     * ouverte. Voir [HandGeometry.openness].
+     */
+    val openness: Float,
+    /** Position d'ancrage du curseur (base de l'index, solidaire de la paume). */
     val pointerX: Float,
     val pointerY: Float,
     /**
@@ -152,17 +157,103 @@ object HandGeometry {
     }
 
     /**
-     * Ancre du curseur : barycentre pondéré du bout de l'index (précis mais bruité) et de la
-     * phalange DIP (stable). 75/25 conserve la finesse du pointage tout en divisant l'amplitude
-     * du tremblement physiologique par près de deux.
+     * Ancre du curseur : **la base de l'index**, et non plus son bout.
+     *
+     * ## Pourquoi reculer d'un doigt
+     *
+     * Le curseur venait du bout de l'index, pondéré avec la phalange DIP — le point le plus fin
+     * pour viser, puisque c'est avec lui qu'on pointe. Cela ne tient plus dès lors que le clic est
+     * **l'ouverture de la main** : ouvrir la main étend l'index, donc déplace son bout. Mesuré en
+     * harnais, entre une main détendue et une main ouverte, le bout de l'index se déplace de
+     * **122 px** sur un écran de 1080 — environ deux centimètres, plus qu'une cible tactile
+     * ordinaire — et il le fait **progressivement, en même temps que le signal** : à mi-signal, le
+     * curseur a déjà bougé de 50 px. Le geste de clic serait ainsi devenu la première cause
+     * d'imprécision du clic.
+     *
+     * Aucune ancre antérieure ne corrige cela, puisqu'il faudrait la prendre avant le début de
+     * l'ouverture, et que c'est l'ouverture qu'on détecte.
+     *
+     * Le MCP de l'index — l'articulation à la base du doigt — se déplace de **0 px** quand les
+     * doigts s'étendent : il appartient à la paume, qui est rigide. On pointe donc toujours « de
+     * l'index », dans sa direction, mais le curseur ne suit plus l'articulation du doigt.
+     *
+     * Ce qu'on y perd est réel et vaut d'être dit : le curseur ne bénéficie plus de la finesse du
+     * bout du doigt, et la main doit se déplacer pour déplacer le curseur, au lieu de pouvoir
+     * pointer du doigt sans bouger le poignet. Ce qu'on y gagne est un clic qui part là où on
+     * visait, ce qui était la demande.
+     *
+     * Le barycentre avec le poignet, léger, évite que le curseur ne colle exactement à un point de
+     * repère unique : il divise le bruit d'estimation résiduel sans introduire de dépendance à la
+     * flexion des doigts, puisque les deux points appartiennent à la paume.
      */
     fun pointerAnchor(lm: List<Landmark>): Pair<Float, Float> {
-        val tip = lm[HandLandmarks.INDEX_TIP]
-        val dip = lm[HandLandmarks.INDEX_DIP]
+        val mcp = lm[HandLandmarks.INDEX_MCP]
+        val wrist = lm[HandLandmarks.WRIST]
         return Pair(
-            tip.x * 0.75f + dip.x * 0.25f,
-            tip.y * 0.75f + dip.y * 0.25f
+            mcp.x * 0.85f + wrist.x * 0.15f,
+            mcp.y * 0.85f + wrist.y * 0.15f
         )
+    }
+
+    /**
+     * **Étendue de la main** : distance moyenne du centre de la paume aux quatre bouts de doigts,
+     * en multiples de [palmScale]. C'est le signal du clic.
+     *
+     * ## Pourquoi ceci, et non une extension de doigt
+     *
+     * Les mesures d'extension par doigt ont été retirées de ce projet, et pour une bonne raison :
+     * l'extension d'un doigt replié se déduit de phalanges que la caméra ne voit pas et que le
+     * modèle devine — on raisonnait sur une inférence d'une inférence. Reconstituer « main
+     * ouverte » à partir de quatre de ces mesures ramènerait exactement ce défaut.
+     *
+     * L'étendue l'évite parce qu'elle ne demande rien à chaque doigt : c'est un **agrégat sur
+     * quatre points**, et ces quatre points sont tous parfaitement visibles dans le seul cas où la
+     * réponse doit être « oui » — la main ouverte, paume vers la caméra. Quand la main est
+     * refermée, les bouts de doigts sont mal estimés, mais la mesure n'a alors besoin que d'être
+     * *basse*, ce que les erreurs d'estimation produisent de toute façon.
+     *
+     * ## Le **minimum** et non la moyenne, et c'est la mesure qui l'a décidé
+     *
+     * « Main ouverte » signifie *tous* les doigts étendus. La contrainte qui lie est donc le doigt
+     * le **moins** étendu, et c'est lui qu'il faut mesurer — une moyenne laisse un doigt replié se
+     * faire compenser par les trois autres.
+     *
+     * Ce n'est pas un raisonnement en l'air : mesuré en harnais, entre main détendue et main
+     * ouverte, la moyenne sépare d'un facteur 1,36 et le minimum d'un facteur **1,61**. Sur un
+     * signal dont la faiblesse est précisément le manque de séparation, un quart de marge en plus
+     * n'est pas un détail.
+     *
+     * Le minimum est en revanche plus sensible à un doigt mal suivi, et c'est assumé : un doigt
+     * estimé trop bas produit un clic **manqué**, là où la moyenne produirait un clic **fantôme**.
+     * Des deux échecs, le premier est de loin le moins coûteux — on recommence ; le second agit sur
+     * le téléphone.
+     *
+     * Mesuré en harnais : 0,44 poing fermé, 0,67 main détendue, 1,08 main ouverte, et strictement
+     * invariant à la distance de la main à la caméra.
+     *
+     * Sa faiblesse est connue et doit être écrite : la pente s'écrase en fin de course — 0,84 au
+     * milieu de la plage, **0,06** sur les derniers dix pour cent d'ouverture. « Grande ouverte »
+     * est donc presque indistinguable de « ouverte à 75 % », et le pouvoir de discrimination est au
+     * milieu de la plage, là où une main détendue se trouve et varie. Un seuil fixe ne tient pas :
+     * une main détendue à 65 % d'extension franchirait le milieu de la plage théorique. C'est
+     * précisément pourquoi le seuil est appris et non constant — voir
+     * [com.example.gesture.PinchDetector], dont toute la mécanique de ligne de base adaptative et
+     * de plancher appris s'applique ici sans modification.
+     */
+    fun openness(lm: List<Landmark>, palmScale: Float): Float {
+        if (palmScale <= 1e-5f) return 0f
+        val (px, py) = palmAnchor(lm)
+        val palm = Landmark(px, py)
+        var closest = Float.MAX_VALUE
+        for (tip in intArrayOf(
+            HandLandmarks.INDEX_TIP,
+            HandLandmarks.MIDDLE_TIP,
+            HandLandmarks.RING_TIP,
+            HandLandmarks.PINKY_TIP
+        )) {
+            closest = minOf(closest, distance(lm[tip], palm))
+        }
+        return closest / palmScale
     }
 
     /**
@@ -208,6 +299,7 @@ object HandGeometry {
         return HandMetrics(
             palmScale = palmScale,
             pinchRatio = distance(lm[HandLandmarks.THUMB_TIP], lm[HandLandmarks.INDEX_TIP]) / palmScale,
+            openness = openness(lm, palmScale),
             pointerX = px,
             pointerY = py,
             palmX = cx,

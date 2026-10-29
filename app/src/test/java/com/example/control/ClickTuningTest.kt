@@ -1,5 +1,6 @@
 package com.example.control
 
+import com.example.gesture.ClickTrigger
 import com.example.gesture.PinchDetector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -25,7 +26,10 @@ class ClickTuningTest {
      * la profondeur exigée, qui ne dépend d'aucune horloge.
      */
     private fun pressesWith(tuning: ClickTuning, floor: Float): Boolean {
-        val d = PinchDetector(tuning.toConfig())
+        // Déclencheur explicite : ce test joue des trajectoires de **pincement**, et la
+        // profondeur atteignable dépend du geste. Laisser la valeur par défaut — l'ouverture de la
+        // main — mesurerait un réglage contre un signal qui n'est pas le sien.
+        val d = PinchDetector(tuning.toConfig(ClickTrigger.PINCH))
         var t = 0L
         repeat(40) { d.update(0.85f, 0.5f, 0.5f, t); t += frameMs }
 

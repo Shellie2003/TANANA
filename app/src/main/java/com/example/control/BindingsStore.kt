@@ -1,6 +1,7 @@
 package com.example.control
 
 import android.content.Context
+import com.example.gesture.ClickTrigger
 
 /**
  * Persistance des préférences.
@@ -31,6 +32,13 @@ class BindingsStore(context: Context) {
         prefs.edit().putString(KEY_COMMANDS, commands.serialize()).apply()
     }
 
+    fun loadClickTrigger(): ClickTrigger =
+        ClickTrigger.fromId(prefs.getString(KEY_CLICK_TRIGGER, null))
+
+    fun saveClickTrigger(trigger: ClickTrigger) {
+        prefs.edit().putString(KEY_CLICK_TRIGGER, trigger.id).apply()
+    }
+
     fun loadClickTuning(): ClickTuning = ClickTuning.fromId(prefs.getString(KEY_CLICK_TUNING, null))
 
     fun saveClickTuning(tuning: ClickTuning) {
@@ -47,6 +55,7 @@ class BindingsStore(context: Context) {
         prefs.edit()
             .remove(KEY_COMMANDS)
             .remove(KEY_CLICK_TUNING)
+            .remove(KEY_CLICK_TRIGGER)
             .remove(KEY_SCROLL_TUNING)
             .apply()
     }
@@ -60,6 +69,7 @@ class BindingsStore(context: Context) {
         const val PREFS_NAME = "nexus_bindings"
         const val KEY_COMMANDS = "panel_commands"
         const val KEY_CLICK_TUNING = "click_tuning"
+        const val KEY_CLICK_TRIGGER = "click_trigger"
         const val KEY_SCROLL_TUNING = "scroll_tuning"
     }
 }

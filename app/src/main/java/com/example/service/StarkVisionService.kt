@@ -43,6 +43,7 @@ import com.example.control.PinchTelemetry
 import com.example.control.Pointer
 import com.example.control.PointerEvent
 import com.example.control.SystemAction
+import com.example.gesture.ClickTrigger
 import com.example.gesture.HandGestureAnalyzer
 import com.example.gesture.HandGestureListener
 import com.example.gesture.HandGestureState
@@ -83,6 +84,10 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
      * et va enchaîner quelques gestes d'essai, qui doivent servir de nouvelle référence.
      */
     private var pointer = Pointer()
+
+    /** Geste qui enfonce le bouton. Relu à chaque démarrage du service. */
+    private var clickTrigger = ClickTrigger.DEFAULT
+
     private val panel = CommandPanel()
 
     /**
@@ -379,7 +384,16 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private fun applyPreferences() {
         commands = bindingsStore.loadCommands()
         commandLabels = commands.labels()
-        pointer = Pointer(detector = PinchDetector(bindingsStore.loadClickTuning().toConfig()))
+        clickTrigger = bindingsStore.loadClickTrigger()
+        pointer = Pointer(
+            detector = PinchDetector(bindingsStore.loadClickTuning().toConfig(clickTrigger)),
+            // Le maintien ne clique que sur quelque chose de réellement cliquable. Le sondage est
+            // injecté, pour que Pointer reste du Kotlin pur : la réponse vient de l'arbre
+            // d'accessibilité, qui n'existe que sur l'appareil.
+            targetProbe = { x, y ->
+                StarkAccessibilityService.snapTarget(x, y, screenWidth, screenHeight) != null
+            }
+        )
         panel.reset()
     }
 
@@ -405,7 +419,9 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             quality = state.confidence,
             x = cursorX,
             y = cursorY,
-            pinchRatio = state.pinchRatio,
+            // Le détecteur ne sait rien du geste qui le pilote : il juge un scalaire qui descend
+            // vers un seuil appris. Le déclencheur choisi dit seulement lequel, et l'oriente.
+            pinchRatio = clickTrigger.signalFrom(state.openness, state.pinchRatio),
             nowMs = now,
             // Le déplacement de la main se mesure sur la paume, que la fermeture des doigts ne
             // bouge pas — là où le bout de l'index, dont vient le curseur, est justement l'endroit

@@ -52,6 +52,13 @@ data class HandGestureState(
      * lissage préalable lui retirerait justement la vivacité sur laquelle il se prononce.
      */
     val pinchRatio: Float = Float.MAX_VALUE,
+    /**
+     * Étendue de la main : distance moyenne paume -> bouts de doigts, en multiples de paume.
+     *
+     * 0,59 poing fermé, 0,86 main détendue, 1,17 main ouverte. Transmise brute, pour la même raison
+     * que [pinchRatio] : c'est le détecteur qui la juge contre une ligne de base apprise.
+     */
+    val openness: Float = 0f,
     /** Plausibilité de la détection, 0..1. */
     val confidence: Float = 0f,
     val landmarks: List<Landmark> = emptyList(),
@@ -427,6 +434,9 @@ class HandGestureAnalyzer(
                 palmX = smoothed.x.coerceIn(0f, 1f),
                 palmY = smoothed.y.coerceIn(0f, 1f),
                 pinchRatio = if (isPinching) 0.10f else 0.85f,
+                // La simulation doit agir sur **les deux** signaux, sans quoi elle ne
+                // déclencherait plus rien dès que le clic passe à la main ouverte.
+                openness = if (isPinching) 1.17f else 0.86f,
                 confidence = 1f,
                 fps = 60,
                 latencyMs = 0,
@@ -639,6 +649,7 @@ class HandGestureAnalyzer(
                 palmX = palmSmoothed.x.coerceIn(0f, 1f),
                 palmY = palmSmoothed.y.coerceIn(0f, 1f),
                 pinchRatio = metrics.pinchRatio,
+                openness = metrics.openness,
                 confidence = metrics.quality,
                 powerMode = frameGate.mode,
                 savingsRatio = frameGate.savingsRatio(),
