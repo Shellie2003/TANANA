@@ -38,6 +38,7 @@ import com.example.control.BindingsStore
 import com.example.control.Command
 import com.example.control.CommandList
 import com.example.control.EdgeScroller
+import com.example.control.ScrollRate
 import com.example.control.PinchTelemetry
 import com.example.control.Pointer
 import com.example.control.PointerEvent
@@ -91,6 +92,12 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
      * arbitrer avec les trois issues du pincement. Il lit la position, et c'est tout.
      */
     private val edgeScroller = EdgeScroller()
+
+    /**
+     * Défilement à vitesse commandée : la troisième méthode, et la seule qui ne borne pas la
+     * distance défilée par la distance que le bras peut parcourir.
+     */
+    private val scrollRate = ScrollRate()
     private var commands = CommandList()
 
     /**
@@ -301,12 +308,24 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
 
     // --- Caméra --------------------------------------------------------------------------------
 
+    /**
+     * Démarre la vision **sans bloquer le thread principal**, et en parallèle de la caméra.
+     *
+     * Les deux initialisations sont indépendantes et duraient l'une après l'autre : le modèle
+     * d'abord, sur le thread principal, puis la caméra. Le coût total était leur somme, et il
+     * atteignait cinq secondes pendant lesquelles rien ne s'affichait. Elles courent maintenant
+     * ensemble, et le coût est celui de la plus lente.
+     *
+     * L'ordre compte : la caméra est liée d'abord, pour que ses premières images arrivent au plus
+     * tôt. Celles qui précèdent la disponibilité du modèle sont ignorées sans frais.
+     */
     private fun startCamera() {
         if (analyzer == null) {
             analyzer = HandGestureAnalyzer(applicationContext, this)
             refreshPowerState()
         }
         bindCamera()
+        analyzer?.let { engine -> cameraExecutor.execute { engine.prepare() } }
     }
 
     private fun unbindCamera() {
@@ -392,7 +411,11 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             // bouge pas — là où le bout de l'index, dont vient le curseur, est justement l'endroit
             // que le pouce vient perturber en pinçant.
             palmX = state.palmX,
-            palmY = state.palmY
+            palmY = state.palmY,
+            // Poser le curseur contre un bord est la façon de défiler : ce ne doit pas être aussi
+            // la façon d'appuyer sur ce qui s'y trouve. Les deux mécanismes se déclenchent sur la
+            // même chose — l'immobilité — et seul l'appelant sait où sont les bandes.
+            dwellInhibited = edgeScroller.isInBand(cursorX, cursorY) || scrollRate.isActive
         )
         // L'écran ne lit cette mesure qu'à 5 Hz : la recalculer à chaque image allouerait trente
         // objets par seconde dont vingt-cinq ne seraient jamais lus.
@@ -414,7 +437,11 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
             pressed = pointer.isPressed,
             // L'anneau affiche la progression réelle du pincement : la même grandeur que celle
             // qui décide. Ce que l'utilisateur voit se remplir correspond donc à ce qui se passe.
-            pinchProgress = pointer.pinchProgress,
+            // Pendant le défilement continu, l'anneau porte la **vitesse commandée** plutôt que la
+            // progression du pincement : c'est la seule grandeur qui compte à cet instant, et un
+            // mode sans retour visible est un piège. On voit donc ce qu'on commande, et la zone
+            // morte se reconnaît à un anneau vide.
+            pinchProgress = scrollRate.state?.rate ?: pointer.pinchProgress,
             // holdProgress, et non longPressProgress : l'anneau porte l'appui long quand le bouton
             // est enfoncé, et le maintien quand il ne l'est pas. Les deux ne peuvent pas courir
             // ensemble, et ce sont la même information pour qui regarde — un compte à rebours
@@ -439,6 +466,10 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
         when {
             keyboardOpen -> routeToKeyboard(events, now)
             panel.isOpen -> routeToPanel(events)
+            // Le défilement à vitesse commandée capture tout : c'est un mode, et pendant qu'il
+            // tourne le déplacement de la main signifie « défiler », pas « viser ». Laisser passer
+            // les appuis produirait des clics à chaque fois qu'on règle la vitesse.
+            scrollRate.isActive -> rateStep(now)
             else -> {
                 events.forEach { dispatch(it) }
                 // Le défilement par les bords ne vit que dans l'interface du dessous : le clavier
@@ -447,6 +478,25 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
                 edgeStep(cursorX, cursorY, now)
             }
         }
+    }
+
+    /**
+     * Un pas de défilement à vitesse commandée.
+     *
+     * Le pas s'applique au **point neutre** et non au curseur : c'est là que se trouve le contenu
+     * qu'on lit, alors que le curseur s'en est écarté pour commander la vitesse. Viser le curseur
+     * ferait défiler ce qui se trouve en bout de course, parfois un autre conteneur.
+     */
+    private fun rateStep(now: Long) {
+        val direction = scrollRate.update(cursorX, cursorY, pointer.isPressed, now) ?: return
+        // L'état est lu **après** la mise à jour : c'est elle qui fixe le point neutre, lequel
+        // n'existe pas encore au premier appel — le mode s'arme puis attend que la main se pose.
+        val neutral = scrollRate.state ?: return
+        StarkAccessibilityService.perform(
+            SystemAction.ScrollStep(neutral.neutralX, neutral.neutralY, direction),
+            screenWidth,
+            screenHeight
+        )
     }
 
     /**
@@ -481,6 +531,13 @@ class StarkVisionService : Service(), LifecycleOwner, HandGestureListener {
     private fun runCommand(command: Command) {
         if (command.action is SystemAction.ToggleKeyboard) {
             toggleKeyboard()
+            return
+        }
+        if (command.action is SystemAction.ToggleScrollRate) {
+            // Le point neutre est pris là où la main se trouve, et non au centre de l'écran : on
+            // active ce mode en lisant, donc la main est déjà dans une position tenable.
+            val active = scrollRate.toggle(cursorX, cursorY)
+            Log.i(TAG, if (active) "Défilement continu activé" else "Défilement continu arrêté")
             return
         }
         if (!StarkAccessibilityService.perform(command.action, screenWidth, screenHeight)) {

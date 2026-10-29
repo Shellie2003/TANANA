@@ -177,13 +177,37 @@ class Pointer(
         val dwellRadius: Float = 0.030f,
 
         /**
+         * Facteur d'élargissement du rayon une fois l'attente bien engagée.
+         *
+         * **C'est la moitié de ce qui rendait le maintien lent, et la moins visible.** Le rayon
+         * était constant, donc une dérive tardive — à 80 % de l'attente — remettait le compte à
+         * zéro et il fallait tout refaire. Or tenir une main en l'air dérive d'autant plus qu'on la
+         * tient longtemps : le rayon constant exigeait le plus de stabilité précisément au moment
+         * où la main en a le moins. La durée nominale n'était alors jamais la durée vécue.
+         *
+         * Le rayon s'élargit donc à mesure que l'attente avance, au-delà de
+         * [dwellCommitProgress]. L'intention est déjà démontrée à ce stade — on est resté là —
+         * et tolérer la dérive ne coûte qu'un appui légèrement décalé, alors que l'annuler coûte
+         * l'attente entière.
+         */
+        val dwellHoldRadiusFactor: Float = 2.2f,
+
+        /** Progression au-delà de laquelle le rayon commence à s'élargir. */
+        val dwellCommitProgress: Float = 0.45f,
+
+        /**
          * Durée d'immobilité qui déclenche l'appui.
          *
-         * Plus long que l'appui long d'Android, délibérément : c'est un appui qu'on ne demande pas
-         * explicitement, donc il doit laisser le temps de l'éviter. L'anneau de progression le rend
-         * visible, de sorte que bouger la main l'annule avant la fin.
+         * Réduite de 900 à 520 ms sur retour d'usage : « la méthode me plaît mais c'est trop
+         * lent ». La valeur retenue n'est pas arbitraire — c'est l'ordre de grandeur de l'appui
+         * long d'Android (500 ms), seuil éprouvé par des milliards d'usages comme marquant une
+         * pause *intentionnelle* plutôt qu'une hésitation. En dessous, on entre dans la durée des
+         * pauses involontaires du pointage, et l'appui partirait en visant.
+         *
+         * L'anneau de progression reste ce qui rend la chose acceptable : on voit l'appui venir,
+         * donc bouger l'annule.
          */
-        val dwellMs: Long = 900L,
+        val dwellMs: Long = 520L,
 
         /**
          * Déplacement à parcourir avant qu'un nouveau maintien puisse déclencher.
@@ -192,8 +216,12 @@ class Pointer(
          * sur une cible produirait un appui par seconde indéfiniment. Il faut donc avoir
          * **quitté** la cible pour pouvoir en viser une autre — ce qui correspond exactement à
          * l'usage, et rend la rafale impossible.
+         *
+         * Réduit de 0,07 à 0,05 avec la durée : c'est l'autre moitié de la lenteur, celle qui se
+         * paie entre deux appuis plutôt que sur un seul. Un cinquième de diagonale reste bien
+         * au-delà de toute dérive involontaire.
          */
-        val dwellRearmTravel: Float = 0.07f
+        val dwellRearmTravel: Float = 0.05f
     )
 
     /** Où en est le geste courant. */
@@ -265,6 +293,21 @@ class Pointer(
      */
     val holdProgress: Float get() = if (isPressed) longPressProgress else dwellProgress
 
+    /**
+     * Le maintien est-il interdit par le contexte ?
+     *
+     * **Corrige un défaut né de la rencontre de deux ajouts, chacun correct seul.** Le défilement
+     * par les bords demande de poser le curseur contre un bord et de ne plus bouger ; le clic par
+     * maintien se déclenche précisément quand on ne bouge plus. Poser le curseur pour défiler
+     * appuyait donc aussi sur ce qui se trouvait sous lui, au bord de l'écran — où vivent souvent
+     * une barre d'état ou une barre d'onglets. Le défilement était non seulement gêné, mais
+     * dangereux.
+     *
+     * L'arbitrage n'appartient pas à [Pointer], qui ne sait rien des bandes de bord : il reçoit la
+     * réponse de son appelant.
+     */
+    private var dwellInhibited = false
+
     /** Vrai quand un maintien peut déclencher : la main a quitté le dernier point cliqué. */
     private var dwellArmed = false
     private var dwellAnchorX = 0.5f
@@ -306,8 +349,10 @@ class Pointer(
         pinchRatio: Float,
         nowMs: Long,
         palmX: Float = x,
-        palmY: Float = y
+        palmY: Float = y,
+        dwellInhibited: Boolean = false
     ): List<PointerEvent> {
+        this.dwellInhibited = dwellInhibited
         if (!handPresent || quality < config.minQuality) return onHandLost(nowMs)
 
         lastSeenAt = nowMs
@@ -366,8 +411,12 @@ class Pointer(
      * Et il faut y rester la durée entière, visible dans l'anneau, donc annulable en bougeant.
      */
     private fun dwell(nowMs: Long): List<PointerEvent> {
-        if (!config.dwellEnabled) {
+        if (!config.dwellEnabled || dwellInhibited) {
             dwellProgress = 0f
+            // Désarmé, et non seulement suspendu : quitter la zone d'inhibition doit redemander un
+            // déplacement franc. Sans cela, le curseur qui en sort déclencherait l'appui resté en
+            // attente, à l'endroit où il arrive — un appui que personne n'a demandé.
+            if (dwellInhibited) disarmDwell(cursorX, cursorY)
             return emptyList()
         }
 
@@ -382,8 +431,10 @@ class Pointer(
             return emptyList()
         }
 
-        // Le curseur a quitté le rayon : la visée recommence d'ici.
-        if (hypot(cursorX - dwellAnchorX, cursorY - dwellAnchorY) > config.dwellRadius) {
+        // Le curseur a quitté le rayon : la visée recommence d'ici. Le rayon toléré s'élargit à
+        // mesure que l'attente avance — voir dwellHoldRadiusFactor, qui explique pourquoi la durée
+        // nominale n'était pas la durée vécue.
+        if (hypot(cursorX - dwellAnchorX, cursorY - dwellAnchorY) > toleratedRadius()) {
             dwellAnchorX = cursorX
             dwellAnchorY = cursorY
             dwellSince = nowMs
@@ -400,6 +451,20 @@ class Pointer(
         val tap = PointerEvent.Tap(dwellAnchorX, dwellAnchorY)
         disarmDwell(dwellAnchorX, dwellAnchorY)
         return listOf(tap)
+    }
+
+    /**
+     * Rayon toléré à l'instant présent : nominal au début de l'attente, élargi vers la fin.
+     *
+     * L'interpolation commence à [Config.dwellCommitProgress] et non à zéro : tolérer la dérive
+     * dès le premier instant ferait partir des appuis en pleine visée, puisque le curseur n'aurait
+     * pas encore eu à démontrer qu'il s'arrête.
+     */
+    private fun toleratedRadius(): Float {
+        val commit = config.dwellCommitProgress
+        if (dwellProgress <= commit) return config.dwellRadius
+        val engaged = ((dwellProgress - commit) / (1f - commit)).coerceIn(0f, 1f)
+        return config.dwellRadius * (1f + (config.dwellHoldRadiusFactor - 1f) * engaged)
     }
 
     private fun disarmDwell(x: Float, y: Float) {

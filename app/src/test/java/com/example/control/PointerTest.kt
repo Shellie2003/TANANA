@@ -393,8 +393,12 @@ class PointerTest {
     fun `bouger annule le maintien avant son terme`() {
         val d = driver(0.5f, 0.5f)
         d.frames(3, 0.8f, 0.3f, open)
-        // Vingt images d'attente, puis la main repart : l'appui ne doit pas aboutir.
-        d.frames(20, 0.8f, 0.3f, open)
+        // Attente volontairement **dérivée du réglage**, et non écrite en dur : une valeur fixe de
+        // vingt images décrivait une attente incomplète tant que le maintien durait 900 ms, et une
+        // attente déjà aboutie après son passage à 520. Le test affirmait alors le contraire de son
+        // intention sans que rien ne le signale — sauf qu'ici, il a échoué, ce qui est le but.
+        val partialFrames = (Pointer.Config().dwellMs * 2 / 3 / frameMs).toInt()
+        d.frames(partialFrames, 0.8f, 0.3f, open)
         d.frames(6, 0.2f, 0.7f, open)
         assertTrue("le maintien a abouti malgré le mouvement", d.only<PointerEvent.Tap>().isEmpty())
     }
@@ -411,6 +415,109 @@ class PointerTest {
         // Puis la main reste posée là où elle vient de cliquer.
         d.frames(40, 0.8f, 0.3f, open)
         assertEquals(1, d.only<PointerEvent.Tap>().size)
+    }
+
+    /**
+     * **Le défaut né de la rencontre de deux ajouts corrects.** Le défilement par les bords demande
+     * de poser le curseur contre un bord et de ne plus bouger ; le maintien se déclenche
+     * précisément quand on ne bouge plus. Poser le curseur pour défiler appuyait donc aussi sur ce
+     * qui se trouvait sous lui — au bord de l'écran, soit souvent une barre d'onglets ou d'état.
+     */
+    @Test
+    fun `le maintien ne declenche pas la ou le defilement prend la main`() {
+        val d = driver(0.5f, 0.5f)
+        repeat(3) {
+            d.pointer.update(
+                handPresent = true, quality = 1f, x = 0.5f, y = 0.02f,
+                pinchRatio = open, nowMs = d.t, dwellInhibited = true
+            ).let { d.events += it }
+            d.t += frameMs
+        }
+        repeat(40) {
+            d.events += d.pointer.update(
+                handPresent = true, quality = 1f, x = 0.5f, y = 0.02f,
+                pinchRatio = open, nowMs = d.t, dwellInhibited = true
+            )
+            d.t += frameMs
+        }
+        assertTrue("un appui est parti dans la bande de défilement", d.only<PointerEvent.Tap>().isEmpty())
+    }
+
+    /**
+     * Et sortir de la zone inhibée ne doit pas libérer l'appui resté en attente : il partirait à
+     * l'endroit où le curseur arrive, que personne n'a visé.
+     */
+    @Test
+    fun `sortir de la zone inhibee ne libere pas un appui en attente`() {
+        val d = driver(0.5f, 0.5f)
+        // Longue immobilité en zone inhibée, puis sortie et immobilité brève ailleurs.
+        repeat(40) {
+            d.events += d.pointer.update(
+                handPresent = true, quality = 1f, x = 0.5f, y = 0.02f,
+                pinchRatio = open, nowMs = d.t, dwellInhibited = true
+            )
+            d.t += frameMs
+        }
+        repeat(4) {
+            d.events += d.pointer.update(
+                handPresent = true, quality = 1f, x = 0.5f, y = 0.40f,
+                pinchRatio = open, nowMs = d.t, dwellInhibited = false
+            )
+            d.t += frameMs
+        }
+        assertTrue(
+            "l'appui en attente a été libéré en sortant de la bande",
+            d.only<PointerEvent.Tap>().isEmpty()
+        )
+    }
+
+    /**
+     * Le réglage de durée doit se **voir** : c'est le reproche qui l'a fait changer — « la méthode
+     * me plaît mais c'est trop lent ». Un maintien qui ignorerait sa configuration rendrait le
+     * retour d'usage inopérant.
+     */
+    @Test
+    fun `la duree du maintien suit son reglage`() {
+        fun framesUntilTap(dwellMs: Long): Int {
+            val d = Driver(Pointer(Pointer.Config(dwellMs = dwellMs)))
+            d.frames(40, 0.5f, 0.5f, open)
+            d.events.clear()
+            d.frames(3, 0.8f, 0.3f, open)
+            var frames = 0
+            while (frames < 200 && d.only<PointerEvent.Tap>().isEmpty()) {
+                d.frame(0.8f, 0.3f, open)
+                frames++
+            }
+            return frames
+        }
+
+        val court = framesUntilTap(300L)
+        val long = framesUntilTap(900L)
+        assertTrue("court=$court long=$long", long > court * 2)
+    }
+
+    /**
+     * Une dérive tardive ne doit pas annuler une attente presque terminée.
+     *
+     * C'est la moitié invisible de la lenteur : tenir une main en l'air dérive d'autant plus qu'on
+     * la tient longtemps, si bien qu'un rayon constant exigeait le plus de stabilité au moment où la
+     * main en a le moins. La durée nominale n'était alors jamais la durée vécue.
+     */
+    @Test
+    fun `une derive tardive n annule pas une attente presque terminee`() {
+        val d = driver(0.5f, 0.5f)
+        d.frames(3, 0.8f, 0.3f, open)
+        // Attente presque complète, puis une dérive au-delà du rayon nominal mais sous le rayon
+        // élargi : l'appui doit tout de même aboutir.
+        val almost = (Pointer.Config().dwellMs * 9 / 10 / frameMs).toInt()
+        d.frames(almost, 0.8f, 0.3f, open)
+        val nominal = Pointer.Config().dwellRadius
+        d.frames(6, 0.8f + nominal * 1.4f, 0.3f, open)
+        assertEquals(
+            "la dérive tardive a annulé l'attente",
+            1,
+            d.only<PointerEvent.Tap>().size
+        )
     }
 
     @Test

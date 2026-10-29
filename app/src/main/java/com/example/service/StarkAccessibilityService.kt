@@ -144,8 +144,10 @@ class StarkAccessibilityService : AccessibilityService() {
             SystemAction.SwitchNext -> quickSwitch(forward = true, width = width, height = height)
             SystemAction.SwitchPrevious -> quickSwitch(forward = false, width = width, height = height)
 
-            // Traitées ailleurs.
+            // Traitées ailleurs : ce sont des modes locaux au contrôle gestuel, qui ne demandent
+            // rien au système. Le service de vision les intercepte avant d'arriver ici.
             SystemAction.ToggleKeyboard,
+            SystemAction.ToggleScrollRate,
             SystemAction.None -> Unit
         }
     }

@@ -37,6 +37,12 @@ enum class Command(
         "Données mobiles, Wi-Fi, lampe, mode avion", SystemAction.QuickSettings
     ),
     KEYBOARD("keyboard", "Clavier", "Ouvre ou ferme la saisie de texte", SystemAction.ToggleKeyboard),
+    SCROLL_RATE(
+        "scroll_rate", "Défilement continu",
+        "La main au-dessus ou en dessous de son point de départ fait défiler, " +
+            "d'autant plus vite qu'elle s'en éloigne. Un pincement en sort.",
+        SystemAction.ToggleScrollRate
+    ),
 
     VOLUME_UP("vol_up", "Volume +", "Augmente le volume", SystemAction.VolumeUp),
     VOLUME_DOWN("vol_down", "Volume −", "Diminue le volume", SystemAction.VolumeDown),
@@ -114,6 +120,9 @@ data class CommandList(val commands: List<Command> = DEFAULTS) {
             Command.NOTIFICATIONS,
             Command.QUICK_SETTINGS,
             Command.KEYBOARD,
+            // Dans la liste par défaut, et pas seulement disponible : une méthode de défilement
+            // qu'il faut d'abord aller configurer pour la découvrir n'existe pas en pratique.
+            Command.SCROLL_RATE,
             Command.VOLUME_UP,
             Command.VOLUME_DOWN,
             Command.PLAY_PAUSE,

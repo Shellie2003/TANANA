@@ -36,6 +36,14 @@ sealed interface SystemAction {
     ) : SystemAction
 
     /**
+     * Entre ou sort du défilement à vitesse commandée.
+     *
+     * Traitée **dans l'application** et non par le service d'accessibilité : c'est un mode local au
+     * contrôle gestuel, qui ne demande rien au système. Voir [ScrollRate].
+     */
+    object ToggleScrollRate : SystemAction
+
+    /**
      * Début d'un tracé continu.
      *
      * [x] et [y] sont le point d'application — là où le doigt se pose. [driveX] et [driveY] sont le

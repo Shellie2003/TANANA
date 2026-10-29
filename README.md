@@ -99,6 +99,7 @@ et sans conséquence ici : ce défaut n'existe que s'il y a autre chose à confo
 | pincer et déplacer la main | **tracé continu** — défilement, balayage, glisser-déposer |
 | viser et ne plus bouger | **appui**, sans pincer du tout |
 | poser le curseur contre un bord | **défilement continu**, sans pincer du tout |
+| « Défilement continu » dans le panneau | **défilement à vitesse commandée** — voir plus bas |
 | amener le curseur au bord droit | **panneau de commandes** |
 
 C'est exactement une souris à un bouton, et c'est voulu : personne n'a à apprendre une souris.
@@ -183,7 +184,58 @@ D'où deux chemins qui ne demandent aucune articulation :
   reste au panneau de commandes.
 
 Ni l'un ni l'autre ne remplace le pincement, plus rapide et plus intentionnel, ni le défilement au
-tracé, seul à être fluide et à amplitude libre. Ils garantissent que l'appareil reste utilisable
+tracé, seul à être fluide et à amplitude libre.
+
+Le maintien a été raccourci de 900 à 520 ms sur retour d'usage — « la méthode me plaît mais c'est
+trop lent ». La durée n'était d'ailleurs que la moitié du problème : le rayon de tolérance était
+**constant**, si bien qu'une dérive tardive remettait le compte à zéro. Or une main tenue en l'air
+dérive d'autant plus qu'on la tient longtemps : le rayon constant exigeait le plus de stabilité au
+moment où la main en a le moins, et la durée nominale n'était jamais la durée vécue. Le rayon
+s'élargit maintenant à mesure que l'attente avance — l'intention est déjà démontrée à ce stade.
+
+#### Le défilement à vitesse commandée, et pourquoi il fallait changer de nature
+
+Les deux méthodes ci-dessus sont en **contrôle de position** : la main se déplace, le contenu se
+déplace d'autant. C'est le modèle du doigt sur la vitre, et il porte une limite qu'aucun réglage ne
+lève — la distance défilable est bornée par la distance que le bras peut parcourir. Un article long
+demande donc de répéter le geste, et répéter un geste aérien fatigue bien plus vite que répéter un
+geste appuyé sur du verre. Le défilement par les bords contourne la borne par une répétition
+automatique, mais au prix de garder le curseur dans une bande étroite, loin de ce qu'on lit.
+
+La commande « Défilement continu » du panneau change de **nature** : le décalage de la main commande
+une **vitesse**, pas une distance. Tenir la main dix pour cent plus bas que son point neutre fait
+défiler lentement et sans fin ; trente pour cent plus bas, vite. Trois propriétés en découlent, dont
+aucune n'est atteignable en contrôle de position :
+
+1. la distance défilée est **sans rapport** avec la distance parcourue par la main — un livre entier
+   se lit sans déplacer le bras de plus de quelques centimètres ;
+2. la vitesse se règle **pendant** le défilement, comme on relâche un accélérateur, là où un geste de
+   position est joué puis constaté ;
+3. le point neutre est là où la main se pose, donc devant ce qu'on lit — rien à viser, aucun bord à
+   atteindre.
+
+Son coût propre est d'être un **mode**, et c'est pourquoi il est lié à une commande et non à un
+geste : un mode dans lequel on tombe par accident est bien pire qu'un mode qu'on choisit. Tout
+pincement en sort, de sorte qu'il existe toujours une sortie qui ne demande pas de retrouver le
+panneau, et l'anneau du curseur porte la vitesse commandée — un mode sans retour visible est un
+piège.
+
+Le point neutre n'est **pas** pris à l'activation, et c'est un défaut qu'il a fallu voir avant qu'il
+n'existe : la commande se choisit dans le panneau, au bord droit de l'écran. L'y fixer aurait fait
+commander un défilement vers la gauche dès que la main revient vers le contenu — le mode se serait
+mis à défiler tout seul, sur le mauvais axe, au moment de son activation. Il s'arme donc, puis
+attend que la main se pose : la première position tenue 300 ms devient le zéro.
+
+#### Deux ajouts corrects, un défaut à leur rencontre
+
+Le défilement par les bords demande de poser le curseur contre un bord et de ne plus bouger ; le clic
+par maintien se déclenche précisément quand on ne bouge plus. Poser le curseur pour défiler appuyait
+donc aussi sur ce qui se trouvait sous lui — au bord de l'écran, soit souvent une barre d'onglets ou
+d'état. Le défilement n'était pas seulement gêné, il était dangereux.
+
+Le maintien est désormais inhibé dans les bandes de défilement et pendant le mode à vitesse
+commandée. Il est **désarmé** et pas seulement suspendu : sans cela, le curseur qui quitte la zone
+libérerait l'appui resté en attente, à l'endroit où il arrive, que personne n'a visé. Ils garantissent que l'appareil reste utilisable
 quand le geste ne part pas, et que parcourir un article long ne coûte pas dix pincements tenus.
 
 #### La précision du curseur : ce que la mesure a contredit
@@ -384,6 +436,30 @@ Le contact maintenu, lui, n'est pas traduit en geste reconnu : il ouvre un trac�
 
 La décision (`GesturePolicy`) est séparée de son exécution : la politique est du Kotlin pur, donc
 vérifiable sans appareil, sans caméra et sans service.
+
+### Les cinq secondes avant que le service démarre
+
+`onStartCommand` tourne sur le **thread principal**, et y construisait l'analyseur, dont le
+constructeur enchaînait jusqu'à **trois** créations de `HandLandmarker` — GPU, puis CPU par asset,
+puis CPU en mémoire — chacune chargeant un modèle de 7,8 Mo. La caméra ne démarrait qu'après. Rien
+ne s'affichait pendant ce temps, et un service de premier plan qui bloque son thread principal aussi
+longtemps frôle l'ANR.
+
+Deux corrections, qui se multiplient plutôt que de s'ajouter :
+
+- **Le chargement sort du thread principal et court en parallèle de la caméra.** Les deux
+  initialisations sont indépendantes et duraient l'une après l'autre ; le coût est maintenant celui
+  de la plus lente, non leur somme. Les images qui arrivent avant que le modèle soit prêt sont
+  ignorées sans frais — quelques images au tout début, rien ensuite.
+- **Le chemin d'initialisation qui a marché est mémorisé.** La cascade existe parce qu'on ne peut
+  pas savoir *à l'avance* lequel des trois fonctionne sur un appareil donné — mais on peut le savoir
+  **après**, et cela ne change pas. Trois chargements de modèle deviennent un seul à chaque
+  démarrage suivant. Le gain est le plus net précisément sur les appareils dont le delegate GPU ne
+  tient pas : c'était l'essai le plus coûteux qui était rejoué à chaque fois.
+
+Rien n'est invalidé explicitement, et ce n'est pas un oubli : une valeur devenue fausse — une mise à
+jour système qui casse le GPU — ne coûte qu'un essai raté avant que la cascade reprenne son cours et
+réécrive la préférence. Un cache dont l'erreur se corrige d'elle-même n'a pas besoin d'être invalidé.
 
 ## Consommation
 

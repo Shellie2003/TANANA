@@ -110,8 +110,14 @@ class HandGestureAnalyzer(
 
         /** Images de destination réutilisées à tour de rôle. Voir [rotatedPool]. */
         const val ROTATED_POOL_SIZE = 3
+
+        /** Préférences du moteur de vision : le chemin d'initialisation qui a marché. */
+        private const val VISION_PREFS = "vision"
+        private const val KEY_DELEGATE_PATH = "delegate_path"
     }
 
+    /** Écrit depuis le fil de préparation, lu depuis le thread d'analyse : d'où le @Volatile. */
+    @Volatile
     private var landmarker: HandLandmarker? = null
     private var visionUnavailable = false
     private var visionError: String? = null
@@ -218,7 +224,33 @@ class HandGestureAnalyzer(
     private var lastIdleEmit = 0L
     private var visionUnavailableNotified = false
 
-    init {
+    /**
+     * **Volontairement pas d'initialisation dans le constructeur.**
+     *
+     * Elle y était, et c'était la cause des cinq secondes qu'il fallait pour activer le service :
+     * `onStartCommand` tourne sur le thread principal, y construisait cet analyseur, et le
+     * constructeur y enchaînait jusqu'à trois créations de `HandLandmarker`, chacune chargeant un
+     * modèle de 7,8 Mo. Rien ne s'affichait pendant ce temps, la caméra ne démarrait qu'après, et
+     * un service de premier plan qui bloque son thread principal aussi longtemps frôle l'ANR.
+     *
+     * [prepare] est donc appelée explicitement, depuis un fil d'arrière-plan, **en parallèle** du
+     * démarrage de la caméra. Les images qui arrivent avant que le modèle soit prêt sont ignorées —
+     * voir le `landmarker ?: return` de l'analyse — ce qui coûte quelques images au tout début et
+     * rien ensuite.
+     */
+    @Volatile
+    private var prepared = false
+
+    /**
+     * Charge le modèle. Idempotente, et à appeler hors du thread principal.
+     *
+     * Synchronisée parce que deux appels concurrents créeraient deux moteurs dont un fuirait : le
+     * service la déclenche depuis son exécuteur, et un redémarrage de caméra pourrait la redemander.
+     */
+    @Synchronized
+    fun prepare() {
+        if (prepared) return
+        prepared = true
         setupMediaPipe()
     }
 
@@ -234,11 +266,21 @@ class HandGestureAnalyzer(
      * chargement n'apparaissait que dans logcat, inaccessible à l'utilisateur.
      */
     private fun setupMediaPipe() {
-        val attempts = listOf(
+        val all = listOf(
             Triple(Delegate.GPU, false, "GPU / asset"),
             Triple(Delegate.CPU, false, "CPU / asset"),
             Triple(Delegate.CPU, true, "CPU / mémoire")
         )
+
+        // Le chemin qui a marché la dernière fois est essayé d'abord, et c'est la seconde moitié du
+        // gain au démarrage. La cascade existe parce qu'on ne peut pas savoir *à l'avance* lequel
+        // des trois fonctionne sur un appareil donné — mais on peut le savoir **après**, et il ne
+        // change pas. La mesurer une fois puis s'en souvenir ramène trois chargements de modèle à
+        // un seul à chaque démarrage suivant, échec du GPU compris : sur un appareil dont le
+        // delegate GPU ne tient pas, c'était l'essai le plus coûteux qui était rejoué chaque fois.
+        val attempts = remembered()
+            ?.let { last -> all.sortedByDescending { it.third == last } }
+            ?: all
 
         val failures = mutableListOf<String>()
         for ((delegate, useBuffer, label) in attempts) {
@@ -246,6 +288,7 @@ class HandGestureAnalyzer(
             result.onSuccess { built ->
                 landmarker = built
                 activeDelegate = delegate
+                remember(label)
                 Log.i(TAG, "HandLandmarker initialisé ($label)")
                 return
             }
@@ -262,6 +305,28 @@ class HandGestureAnalyzer(
             append(failures.lastOrNull() ?: "cause inconnue")
         }
         Log.e(TAG, "Suivi de main indisponible. ${deviceDiagnostics()} | ${failures.joinToString(" | ")}")
+    }
+
+    /**
+     * Chemin d'initialisation retenu la dernière fois, s'il y en a un.
+     *
+     * Rien n'est invalidé explicitement, et ce n'est pas un oubli : une valeur devenue fausse —
+     * mise à jour système qui casse le delegate GPU, par exemple — ne coûte qu'un essai raté avant
+     * que la cascade reprenne son cours et réécrive la préférence. Un cache dont l'erreur se
+     * corrige d'elle-même n'a pas besoin d'être invalidé.
+     */
+    private fun remembered(): String? = runCatching {
+        context.getSharedPreferences(VISION_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_DELEGATE_PATH, null)
+    }.getOrNull()
+
+    private fun remember(label: String) {
+        runCatching {
+            context.getSharedPreferences(VISION_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DELEGATE_PATH, label)
+                .apply()
+        }
     }
 
     /**
