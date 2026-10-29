@@ -308,10 +308,21 @@ jobs:
             )
           else
             signature_note=$(cat <<'SIG'
-          Elle est **signée avec la clé de debug** : installable pour tester, mais à ne jamais
-          publier. Pour une vraie diffusion, déposer la clé dans les secrets du dépôt —
-          `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`,
+          ### Désinstallez l'application avant d'installer celle-ci
+
+          Faute de clé de release, le build retombe sur la clé de debug **interne à Gradle**, qui
+          vit dans `~/.android/debug.keystore`. Ce fichier n'existe pas sur un runner neuf : Gradle
+          en génère un, avec une clé **aléatoire**, à chaque build. Deux APK d'ici n'ont donc jamais
+          la même signature, et Android refuse d'installer par-dessus une signature différente — le
+          message affiché est « Application non installée », qui ne dit pas pourquoi.
+
+          Il faut donc désinstaller « A » d'abord, ce qui efface les réglages et l'autorisation
+          d'accessibilité. **Déposer les quatre secrets de signature supprime cette contrainte pour
+          de bon** : `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`,
           `RELEASE_KEY_PASSWORD`. Voir la section « Signature » du README.
+
+          Cette APK n'est de toute façon pas publiable : la clé de debug est, par construction,
+          connue de tous.
           SIG
             )
           fi

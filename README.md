@@ -481,6 +481,22 @@ est exactement la garantie demandée.
 
 ## Signature
 
+### Sans clé déposée, chaque build a une signature différente
+
+À connaître avant toute chose, parce que le symptôme ne dit pas sa cause. Faute de clé de release,
+le build retombe sur `signingConfigs.getByName("debug")` — la configuration de debug **interne à
+Gradle**, adossée à `~/.android/debug.keystore`. Ce fichier n'existe pas sur un runner
+d'intégration continue, qui est neuf à chaque exécution : Gradle en génère un, avec une clé
+**aléatoire**, à chaque build.
+
+Deux APK produites ici n'ont donc jamais la même signature, et Android refuse d'installer par-dessus
+une signature différente. Le message affiché est « Application non installée », qui ne distingue pas
+ce cas d'une dizaine d'autres. Il faut désinstaller l'application avant chaque installation, ce qui
+efface les réglages **et** l'autorisation d'accessibilité.
+
+Déposer les quatre secrets ci-dessous supprime la contrainte pour de bon : la clé devient stable, et
+chaque build s'installe par-dessus le précédent en conservant les données.
+
 ### Créer la clé, une seule fois
 
 ```bash
